@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .classifier import confirm_type, find_phrases, is_yes, mentions
-from .models import Action, Decision, FormPage, FormType, Option, PageStatus, Profile, Slot
+from .models import Action, Analysis, Category, Decision, FormPage, FormType, Option, PageStatus, Profile, Slot
 from .schedule import clashing, fmt_time, normalize, parse_slot
 
 # The faculty's own name contains "компјутерско инженерство", which is also a study program.
@@ -51,24 +51,25 @@ def _describe(slot: Slot) -> str:
     return f"{slot.label} ({fmt_time(slot.start)}-{fmt_time(slot.end)})"
 
 
-def decide_lab(options: Iterable[Option], busy: list[Slot], profile: Profile) -> Decision:
-    notes = []
+def lab_candidates(
+    options: Iterable[Option], busy: list[Slot], profile: Profile,
+) -> tuple[list[tuple[Slot, Option]], dict[str, str]]:
+    """The free slots, best first by profile.prefer, and why each other option was left out (by value)."""
+    rejected = {}
     candidates: list[tuple[Slot, Option]] = []
     for option in options:
         if option.disabled:
+            rejected[option.value] = f"{option.label!r} is full or closed"
             continue
         slot = parse_slot(option.label)
         if slot is None:
-            notes.append(f"can't read a day/time in {option.label!r}")
+            rejected[option.value] = f"can't read a day/time in {option.label!r}"
             continue
         clash = clashing(slot, busy, profile.min_gap_minutes)
         if clash:
-            notes.append(f"{option.label!r} clashes with {clash[0].label!r}")
+            rejected[option.value] = f"{option.label!r} clashes with {clash[0].label!r}"
             continue
         candidates.append((slot, option))
-
-    if not candidates:
-        return Decision(Action.NEEDS_USER, FormType.LAB, reason="no free slot", notes=tuple(notes))
 
     if all(slot.day for slot, _ in candidates):
         candidates.sort(key=lambda c: (c[0].day, c[0].start))
@@ -76,8 +77,28 @@ def decide_lab(options: Iterable[Option], busy: list[Slot], profile: Profile) ->
         candidates.sort(key=lambda c: (c[0].weekday, c[0].start))
     if profile.prefer == "latest":
         candidates.reverse()
+    return candidates, rejected
+
+
+def decide_lab(options: Iterable[Option], busy: list[Slot], profile: Profile) -> Decision:
+    options = list(options)
+    candidates, rejected = lab_candidates(options, busy, profile)
+    notes = tuple(rejected[o.value] for o in options if o.value in rejected and not o.disabled)
+    if not candidates:
+        return Decision(Action.NEEDS_USER, FormType.LAB, reason="no free slot", notes=notes)
     slot, option = candidates[0]
-    return Decision(Action.SUBMIT, FormType.LAB, option, reason=f"free: {_describe(slot)}", notes=tuple(notes))
+    return Decision(Action.SUBMIT, FormType.LAB, option, reason=f"free: {_describe(slot)}", notes=notes)
+
+
+def page_decision(page: FormPage) -> Decision | None:
+    """The checks before any pick. None means the form is open and not answered yet."""
+    if page.already_answered:
+        return Decision(Action.SKIP, reason="already answered")
+    if page.status is PageStatus.NOT_OPEN_YET:
+        return Decision(Action.RETRY, reason="form is not open yet")
+    if page.status is PageStatus.CLOSED:
+        return Decision(Action.SKIP, reason="form is closed")
+    return None
 
 
 def decide_form(
@@ -88,12 +109,8 @@ def decide_form(
     busy: list[Slot],
 ) -> Decision:
     """Everything after the page has been read: status checks, type check, then the pick."""
-    if page.already_answered:
-        return Decision(Action.SKIP, reason="already answered")
-    if page.status is PageStatus.NOT_OPEN_YET:
-        return Decision(Action.RETRY, reason="form is not open yet")
-    if page.status is PageStatus.CLOSED:
-        return Decision(Action.SKIP, reason="form is closed")
+    if before := page_decision(page):
+        return before
 
     form_type, why = confirm_type(hints, page.options)
     if form_type is None:
@@ -101,3 +118,58 @@ def decide_form(
     if form_type is FormType.MIDTERM:
         return decide_midterm(page.options, f"{page.title}\n{page.intro}\n{email_text}", profile)
     return decide_lab(page.options, busy, profile)
+
+
+_FORM_TYPES = {Category.LAB_FORM: FormType.LAB, Category.MIDTERM_FORM: FormType.MIDTERM}
+
+
+def check_suggestion(
+    analysis: Analysis,
+    page: FormPage,
+    email_text: str,
+    profile: Profile,
+    busy: list[Slot],
+) -> Decision:
+    """Gemini's suggested option, submitted only if it passes the same checks as decide_form.
+
+    Anything else (another kind of form, an option that isn't on the page, a slot that clashes
+    or is full, a midterm answer the program check doesn't give) is left to the user.
+    """
+    if before := page_decision(page):
+        return before
+    form_type = _FORM_TYPES.get(analysis.category)
+    if form_type is None:
+        what = analysis.category.value.replace("_", " ")
+        return Decision(Action.NEEDS_USER, reason=f"Gemini says this is {what}, not a lab or midterm form")
+    confirmed, why = confirm_type(frozenset({form_type}), page.options)
+    if confirmed is None:
+        return Decision(Action.NEEDS_USER, form_type, reason=why)
+
+    by_value = {o.value: o for o in page.options}
+    suggested = by_value.get(analysis.option_value) if analysis.option_value is not None else None
+    if analysis.option_value is not None and suggested is None:
+        return Decision(Action.NEEDS_USER, form_type, reason="Gemini picked an option that isn't on the form")
+    said = f"Gemini suggests {suggested.label!r}" if suggested else "Gemini suggests not answering"
+
+    if form_type is FormType.MIDTERM:
+        rule = decide_midterm(page.options, f"{page.title}\n{page.intro}\n{email_text}", profile)
+        if rule.action is Action.SUBMIT and suggested == rule.option:
+            return rule
+        if rule.action is Action.SKIP and suggested is None:
+            return rule
+        if rule.action is Action.NEEDS_USER:
+            return rule  # the checks can't confirm any answer, so Gemini's alone isn't enough
+        checks = f"the checks say {rule.option.label!r}" if rule.option else f"the checks say skip ({rule.reason})"
+        return Decision(Action.NEEDS_USER, form_type, reason=f"{said}, {checks}")
+
+    candidates, rejected = lab_candidates(page.options, busy, profile)
+    if suggested is None:
+        free = ", ".join(repr(o.label) for _, o in candidates) or "none"
+        return Decision(Action.NEEDS_USER, form_type, reason=f"{said}; free by your schedule: {free}")
+    if suggested.value in rejected:
+        return Decision(Action.NEEDS_USER, form_type, reason=f"{said}, but {rejected[suggested.value]}")
+    slot = next(s for s, o in candidates if o == suggested)
+    notes = ()
+    if candidates[0][1] != suggested:
+        notes = (f"prefer: {profile.prefer} would pick {candidates[0][1].label!r}",)
+    return Decision(Action.SUBMIT, form_type, suggested, reason=f"free: {_describe(slot)}", notes=notes)

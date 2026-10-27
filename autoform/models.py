@@ -12,6 +12,17 @@ class FormType(str, Enum):
     IGNORE = "ignore"
 
 
+class Category(str, Enum):
+    """What a course email is about (Gemini's answer, or the keyword fallback's)."""
+    LAB_FORM = "lab_form"
+    MIDTERM_FORM = "midterm_form"
+    OTHER_FORM = "other_form"
+    EVENT = "event"
+    SCHEDULE_CHANGE = "schedule_change"
+    ANNOUNCEMENT = "announcement"
+    OTHER = "other"
+
+
 class Action(str, Enum):
     SUBMIT = "submit"
     SKIP = "skip"              # nothing to do, never look at it again
@@ -72,6 +83,17 @@ class Profile:
     other_programs: tuple[str, ...] = ()
     min_gap_minutes: int = 0
     prefer: str = "earliest"  # "earliest" | "latest"
+    private_words: tuple[str, ...] = ()  # your name and address: removed before text goes to Gemini
+
+
+@dataclass(frozen=True)
+class Analysis:
+    """What an email (and its form) is about, and the short message for your phone."""
+    category: Category
+    message: str
+    option_value: str | None = None  # the option Gemini suggests; only for lab/midterm forms
+    reason: str = ""
+    source: str = "gemini"  # "gemini" | "keywords"
 
 
 @dataclass(frozen=True)

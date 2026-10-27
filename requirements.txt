@@ -2,4 +2,6 @@ playwright>=1.49
 pyyaml>=6.0
 keyring>=25.0
 win11toast>=0.34
+google-genai>=2.33
+jsonschema>=4.23
 pytest>=8.0

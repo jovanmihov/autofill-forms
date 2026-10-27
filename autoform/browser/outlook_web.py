@@ -22,6 +22,10 @@ ITEM = '[role="listbox"] [role="option"][data-convid]'
 TAB = 'button[role="tab"][value="{}"]'  # the Focused / Other tabs
 BODY = 'div[id^="UniqueMessageBody"]'
 SUBJECT = '[role="heading"][id$="_SUBJECT"][title]'
+# A row's first titled button is Outlook's read/unread toggle ("Mark as read" / "Mark as unread").
+# Only whether its title changes is used, so the language of the titles doesn't matter.
+TOGGLE = "button[title]"
+MARK_READ_WAIT_MS = 2000  # how long Outlook gets to mark an opened email as read
 
 _READ_ITEMS_JS = """() => [...document.querySelectorAll('[role="listbox"] [role="option"][data-convid]')].map(o => ({
   convId: o.getAttribute('data-convid'),
@@ -30,7 +34,14 @@ _READ_ITEMS_JS = """() => [...document.querySelectorAll('[role="listbox"] [role=
 }))"""
 _BODY_LINKS_JS = """bodies => bodies.flatMap(b => [...b.querySelectorAll('a[href]')].map(a => [a.href, a.innerText.trim()]))"""
 
+_TOGGLE_JS = """([convId, before, changed]) => {
+  const row = document.querySelector(`[role="listbox"] [role="option"][data-convid="${CSS.escape(convId)}"]`);
+  const toggle = row && row.querySelector('button[title]');
+  return !!toggle && (toggle.title !== before) === changed;
+}"""
+
 _DATE_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)?", re.IGNORECASE)
+_ADDRESS_RE = re.compile(r"[^\s@<>]+@([^\s@<>]+\.[^\s@<>]+)")
 
 
 class OutlookLoginNeeded(SetupError):
@@ -43,6 +54,13 @@ class ListedEmail:
     label: str  # sender, subject, time and preview, as Outlook reads them out
     received: datetime | None
     tab: str | None = None  # "focused" / "other", or None without Focused Inbox
+    sender: str = ""
+
+
+def is_course_sender(address: str, domain_prefix: str) -> bool:
+    """True for any address on a domain starting with domain_prefix ("x@courses.example.edu" for "courses.")."""
+    m = _ADDRESS_RE.fullmatch(address.strip())
+    return bool(m and domain_prefix and m.group(1).casefold().startswith(domain_prefix.casefold()))
 
 
 def parse_list_date(text: str) -> datetime | None:
@@ -73,8 +91,9 @@ def open_inbox(page: Page, url: str, timeout_ms: int) -> None:
         raise
 
 
-def list_moodle_emails(page: Page, sender: str, since: datetime | None = None, max_scrolls: int = 0) -> list[ListedEmail]:
-    """Emails from sender in the Inbox (Focused and Other), newest first.
+def list_course_emails(page: Page, domain_prefix: str, since: datetime | None = None,
+                       max_scrolls: int = 0) -> list[ListedEmail]:
+    """Emails from any address @<domain_prefix>* in the Inbox (Focused and Other), newest first.
 
     Outlook only draws the rows on screen, so with max_scrolls > 0 the list is
     scrolled down until rows older than since show up or the list ends.
@@ -94,8 +113,9 @@ def list_moodle_emails(page: Page, sender: str, since: datetime | None = None, m
                 titles = [t or "" for t in raw["titles"]]
                 received = next((d for d in map(parse_list_date, titles) if d), None)
                 oldest = min(filter(None, (oldest, received)), default=None)
-                if any(t.casefold() == sender.casefold() for t in titles):
-                    found.setdefault(raw["convId"], ListedEmail(raw["convId"], raw["label"], received, tab))
+                sender = next((t for t in titles if is_course_sender(t, domain_prefix)), None)
+                if sender:
+                    found.setdefault(raw["convId"], ListedEmail(raw["convId"], raw["label"], received, tab, sender))
             if scroll == max_scrolls or (since and oldest and oldest < since) or not _scroll(page):
                 break
     emails = [e for e in found.values() if not since or not e.received or e.received >= since]
@@ -153,9 +173,16 @@ def _show_item(page: Page, item: ListedEmail, max_scrolls: int = 40):
     raise LookupError(f"email {item.conv_id} is no longer in the Inbox list")
 
 
-def read_email(page: Page, item: ListedEmail, timeout_ms: int) -> Email:
-    """Open the email in the reading pane (Outlook marks it as read) and read its text and links."""
-    _show_item(page, item).click()
+def read_email(page: Page, item: ListedEmail, timeout_ms: int, keep_unread: bool = False) -> Email:
+    """Open the email in the reading pane and read its text and links.
+
+    Outlook marks an opened email as read. With keep_unread, an email that was unread
+    before is marked unread again right after it has been read.
+    """
+    row = _show_item(page, item)
+    toggle = row.locator(TOGGLE).first
+    before = toggle.get_attribute("title") if toggle.count() else None
+    row.click()
     page.wait_for_url(lambda url: item.conv_id in unquote(url), timeout=timeout_ms)
     page.wait_for_selector(BODY, timeout=timeout_ms)
     page.wait_for_timeout(500)  # the body is filled in a moment after it appears
@@ -164,4 +191,29 @@ def read_email(page: Page, item: ListedEmail, timeout_ms: int) -> Email:
     text = "\n".join(bodies.all_inner_texts())
     links = tuple((href, label) for href, label in bodies.evaluate_all(_BODY_LINKS_JS))
     log.debug("read email %r: %d link(s)", subject, len(links))
+    if keep_unread and before is not None:
+        _restore_unread(page, item, before)
     return Email(message_id=item.conv_id, subject=subject, body=text, received=item.received, links=links)
+
+
+def _toggle_is(page: Page, item: ListedEmail, before: str, changed: bool, timeout_ms: int) -> bool:
+    try:
+        page.wait_for_function(_TOGGLE_JS, arg=[item.conv_id, before, changed], timeout=timeout_ms)
+        return True
+    except PlaywrightTimeout:
+        return False
+
+
+def _restore_unread(page: Page, item: ListedEmail, before: str) -> None:
+    """If opening the email flipped its read/unread toggle, flip it back."""
+    if not _toggle_is(page, item, before, changed=True, timeout_ms=MARK_READ_WAIT_MS):
+        return  # it was read already
+    toggle = _show_item(page, item).locator(TOGGLE).first
+    toggle.dispatch_event("click")
+    if not _toggle_is(page, item, before, changed=False, timeout_ms=3000):
+        _show_item(page, item).hover()  # the toggle may only react to a real click on the hovered row
+        toggle.click(force=True)
+        if not _toggle_is(page, item, before, changed=False, timeout_ms=3000):
+            log.warning("could not mark email %s unread again", item.conv_id)
+            return
+    log.debug("marked email %s unread again", item.conv_id)

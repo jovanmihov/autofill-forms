@@ -23,14 +23,15 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
-from autoform import credentials
-from autoform.classifier import describe_hints, email_hints
+from autoform import credentials, discord_webhook
+from autoform.classifier import describe_hints, email_hints, keyword_analysis
 from autoform.config import (
     LOGS_DIR, STATE_FILE, Config, SetupError, check_not_example, load_config, load_profile, load_schedule,
 )
-from autoform.decide import decide_form
+from autoform.decide import check_suggestion, decide_form, page_decision
+from autoform.gemini import FORM_KINDS, Gemini, GeminiError
 from autoform.links import activity_links, is_choice, pick_target
-from autoform.models import Action, FormType
+from autoform.models import Action, Analysis, Category, Decision, Email, FormPage, FormType
 from autoform.notify import notify
 from autoform.state import RETRY_SECONDS, State
 
@@ -40,6 +41,13 @@ FORMS_DIR = LOGS_DIR / "forms"
 LOCK_FILE = LOGS_DIR / "browser.lock"
 OUTLOOK_RELOAD_SECONDS = 30 * 60
 MAX_ERRORS_IN_A_ROW = 5
+
+# Notification titles for emails without a form to answer.
+TITLES = {
+    Category.LAB_FORM: "Lab form", Category.MIDTERM_FORM: "Midterm form", Category.OTHER_FORM: "Form",
+    Category.EVENT: "Event", Category.SCHEDULE_CHANGE: "Schedule change",
+    Category.ANNOUNCEMENT: "Announcement", Category.OTHER: "Course email",
+}
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -87,6 +95,15 @@ class StopMoodle(Exception):
     """No usable CAS login: leave Moodle alone until the user runs set-password."""
 
 
+def make_gemini(config: Config) -> Gemini | None:
+    """Gemini with the saved API key, or None (keyword classifier) when no key is saved."""
+    key = credentials.load_secret(credentials.GEMINI_KEY)
+    if not key or not config.gemini_models:
+        log.info("no Gemini API key saved, using the keyword classifier (py main.py set-gemini-key)")
+        return None
+    return Gemini(key, config.gemini_models, config.gemini_timeout_seconds, config.gemini_min_interval_seconds)
+
+
 class Runner:
     """One browser with two tabs: Outlook on the web and Moodle."""
 
@@ -101,6 +118,9 @@ class Runner:
             page.set_default_timeout(self.timeout)
         self.profile = None
         self.reload_preferences()
+        self.gemini = make_gemini(config)
+        if dry_run:
+            print(f"Gemini: {', '.join(config.gemini_models)}" if self.gemini else "Gemini: no key saved, using keywords")
 
     def reload_preferences(self) -> None:
         """Read preferences/ again, so edits apply without restarting watch."""
@@ -122,9 +142,32 @@ class Runner:
 
     def tell(self, title: str, message: str, link: str | None = None) -> None:
         if self.dry_run:
-            print(f"  [dry run] would notify: {title}: {message}")
+            print(f"  [dry run] would notify (PC + phone): {title}: {message}{f'  {link}' if link else ''}")
         else:
             notify(title, message, link)
+
+    # --- what an email is about ---------------------------------------------
+
+    def show(self, what: str, analysis: Analysis) -> None:
+        if self.dry_run:
+            option = f", option {analysis.option_value}" if analysis.option_value else ""
+            reason = f" ({analysis.reason})" if analysis.reason else ""
+            print(f"  {analysis.source} ({what}): {analysis.category.value}{option}: {analysis.message}{reason}")
+
+    def read_email(self, email: Email, hints: frozenset[FormType], has_form: bool) -> Analysis:
+        """What the email is about: Gemini's answer, else (no key, or Gemini failed) the keywords'."""
+        analysis = None
+        if self.gemini:
+            try:
+                analysis = self.gemini.read_email(email, self.profile.private_words)
+            except GeminiError as e:
+                log.warning("Gemini gave no usable answer about the email: %s", e)
+                if self.dry_run:
+                    print(f"  Gemini failed on the email: {e}")
+        if analysis is None:
+            analysis = keyword_analysis(email.subject, hints, has_form)
+        self.show("email", analysis)
+        return analysis
 
     # --- Moodle login ------------------------------------------------------
 
@@ -160,11 +203,11 @@ class Runner:
     def check_mail(self, since: datetime, max_scrolls: int) -> None:
         from autoform.browser import outlook_web
 
-        items = outlook_web.list_moodle_emails(self.outlook, self.config.moodle_sender, since, max_scrolls)
-        log.debug("%d Moodle email(s) in the Inbox list", len(items))
+        items = outlook_web.list_course_emails(self.outlook, self.config.sender_domain_prefix, since, max_scrolls)
+        log.debug("%d course email(s) in the Inbox list", len(items))
         for item in items:
-            if self.state.email_done(item.conv_id) or not email_hints(item.label, self.config.keywords):
-                continue  # done before, or not about a form (left unopened, so it stays unread)
+            if self.state.email_done(item.conv_id) or self.state.email_waiting(item.conv_id):
+                continue  # done before, or its form isn't due for another look yet
             try:
                 self.process_email(item)
             except StopMoodle as e:
@@ -180,32 +223,79 @@ class Runner:
     def process_email(self, item) -> None:
         from autoform.browser import moodle_form, outlook_web
 
-        email = outlook_web.read_email(self.outlook, item, self.timeout)
+        email = outlook_web.read_email(self.outlook, item, self.timeout, keep_unread=self.config.keep_unread)
         text = f"{email.subject}\n{email.body}"
         hints = email_hints(text, self.config.keywords) or email_hints(item.label, self.config.keywords)
         keywords = [k for hint in hints for k in self.config.keywords[hint.value]]
         kind, url = pick_target(email.links, self.config.moodle_url, keywords)
-        if kind == "forum":
-            self.goto_moodle(url)
-            kind, url = pick_target(moodle_form.post_links(self.moodle), self.config.moodle_url, keywords)
-        log.info("email %r: %s, %s %s", email.subject, describe_hints(hints), kind, url or "")
         if self.dry_run:
             when = f"{email.received:%Y-%m-%d %H:%M}" if email.received else "?"
-            print(f"\n{when}  {email.subject}\n  type: {describe_hints(hints)}, link: {url or kind}")
+            print(f"\n{when}  {email.subject}\n  keywords: {describe_hints(hints)}, link: {url or kind}")
+        # Asked once per email: a form that isn't open yet brings the email back every few minutes.
+        summary = self.state.email_summary(item.conv_id) or self.read_email(email, hints, kind in ("activity", "several"))
+        link = url
+        if kind == "forum" and (hints or summary.category in FORM_KINDS):
+            # A form email that only links to its forum post: the form link is in the post.
+            self.goto_moodle(url)
+            kind, url = pick_target(moodle_form.post_links(self.moodle), self.config.moodle_url, keywords)
+            link = url or link
+        log.info("email %r from %s: %s (%s), %s %s", email.subject, item.sender, summary.category.value,
+                 summary.source, kind, url or "")
 
-        if kind == "several":
-            self.tell("Needs you", f"Several forms are linked in: {email.subject}")
-            status = "needs_user"
-        elif kind != "activity":
-            status = "skipped"
+        if kind == "activity":
+            status = self.process_activity(url, email, hints, summary)
         else:
-            status = self.process_activity(url, hints, text)
+            status = self.inform(summary, kind, link)
         if not self.dry_run:
-            self.state.record_email(item.conv_id, status, subject=email.subject, url=url)
+            self.state.record_email(
+                item.conv_id, status, subject=email.subject, url=url if kind == "activity" else None,
+                category=summary.category.value, message=summary.message, source=summary.source,
+            )
+
+    def inform(self, summary: Analysis, kind: str, link: str | None) -> str:
+        """An email without one Moodle form to answer: tell the user what it is about."""
+        if kind == "several":
+            self.tell("Needs you", f"{summary.message} (it links several forms: answer them yourself)", link)
+            return "needs_user"
+        self.tell(TITLES[summary.category], summary.message, link)
+        return "informed"
 
     # --- Moodle form -------------------------------------------------------
 
-    def process_activity(self, url: str, hints: frozenset[FormType], email_text: str) -> str:
+    def decide(self, page: FormPage, email: Email | None, hints: frozenset[FormType]) -> tuple[Decision, Analysis | None]:
+        """With Gemini, its choice must pass decide.py's checks. Without a key, decide.py picks alone."""
+        email_text = f"{email.subject}\n{email.body}" if email else ""
+        if self.gemini is None:
+            return decide_form(hints, page, email_text, self.profile, self.busy), None
+        if before := page_decision(page):
+            return before, None  # answered, closed or not open yet: nothing to ask Gemini
+        try:
+            choice = self.gemini.choose_option(page, email, self.profile, self.busy)
+        except GeminiError as e:
+            log.warning("Gemini gave no usable answer about the form: %s", e)
+            if self.dry_run:
+                print(f"  Gemini failed on the form: {e}")
+            return Decision(Action.NEEDS_USER, reason="Gemini gave no usable answer, so nothing was submitted"), None
+        self.show("form", choice)
+        return check_suggestion(choice, page, email_text, self.profile, self.busy), choice
+
+    def report(self, decision: Decision, what: str, url: str, saved: bool = True) -> None:
+        """The notification (PC + phone) for a form's outcome."""
+        kind = decision.form_type.value.title() if decision.form_type else "Form"
+        choice = decision.option.label if decision.option else ""
+        if decision.action is Action.SUBMIT and saved:
+            self.tell(kind, f"{what}. I chose {choice} for you.", url)
+        elif decision.action is Action.SUBMIT:
+            self.tell("Needs you", f"{what}: saved {choice!r}, but Moodle doesn't show it. Please check.", url)
+        elif decision.action is Action.RETRY:
+            self.tell("Waiting for a form", f"{what}: not open yet, checking every {RETRY_SECONDS // 60} min", url)
+        elif decision.action is Action.NEEDS_USER:
+            self.tell("Needs you", f"{what}: {decision.reason}", url)
+        else:
+            self.tell(kind, f"{what}: nothing to do ({decision.reason})", url)
+
+    def process_activity(self, url: str, email: Email | None, hints: frozenset[FormType],
+                         summary: Analysis | None = None) -> str:
         from autoform.browser import moodle_form
 
         if self.state.activity_done(url):
@@ -213,14 +303,16 @@ class Runner:
         if not self.state.activity_due(url):
             return "retry"
         if not is_choice(url):
-            self.tell("Needs you", "This form isn't a Moodle Choice, so fill it in yourself.", url)
+            what = summary.message if summary else "A form"
+            self.tell("Needs you", f"{what} (not a Moodle Choice, so fill it in yourself)", url)
             if not self.dry_run:
                 self.state.record_activity(url, "needs_user", reason="not a Choice activity")
             return "needs_user"
 
         self.goto_moodle(url)
         page = moodle_form.read_form(self.moodle)
-        decision = decide_form(hints, page, email_text, self.profile, self.busy)
+        decision, analysis = self.decide(page, email, hints)
+        what = next((a.message for a in (analysis, summary) if a and a.message), page.title)
         kind = decision.form_type.value if decision.form_type else "form"
         choice = decision.option.label if decision.option else ""
         log.info("%s %r: %s %s (%s)", kind, page.title, decision.action.value, choice, decision.reason)
@@ -232,32 +324,30 @@ class Runner:
             print(f"  form: {page.title} ({page.status.value}{', already answered: ' + page.selection if page.already_answered else ''})")
             for option in page.options:
                 marks = "".join(m for m, on in (("  [disabled]", option.disabled), ("  [checked]", option.checked)) if on)
-                print(f"    - {option.label}{marks}")
+                print(f"    - {option.value}: {option.label}{marks}")
             verdict = f"would choose: {choice}" if decision.action is Action.SUBMIT else decision.action.value
             print(f"  [dry run] {kind}: {verdict} ({decision.reason})")
             for note in decision.notes:
                 print(f"    {note}")
             print(f"  saved {shot} and .html")
+            self.report(decision, what, url)
             return "dry_run"
 
         info = {"title": page.title, "type": kind, "reason": decision.reason}
+        if analysis:
+            info["gemini"] = analysis.category.value
         if decision.action is Action.SUBMIT:
             saved = moodle_form.submit_choice(self.moodle, url, decision.option)
             shot = moodle_form.save_evidence(self.moodle, FORMS_DIR, f"submitted-{page.title}")
-            if saved:
-                notify(f"{kind.title()}: {choice}", f"saved on {page.title}", url)
-                status = "submitted"
-            else:
-                notify("Needs you", f"Saved {choice!r} on {page.title}, but Moodle doesn't show it. Please check.", url)
-                status = "needs_user"
+            self.report(decision, what, url, saved)
+            status = "submitted" if saved else "needs_user"
             self.state.record_activity(url, status, choice=choice, screenshot=str(shot), **info)
             return status
         if decision.action is Action.RETRY:
             if self.state.record_retry(url, **info):
-                notify("Waiting for a form", f"{page.title} isn't open yet; checking every {RETRY_SECONDS // 60} min", url)
+                self.report(decision, what, url)
             return "retry"
-        if decision.action is Action.NEEDS_USER:
-            notify("Needs you", f"{page.title}: {decision.reason}", url)
+        self.report(decision, what, url)
         status = "needs_user" if decision.action is Action.NEEDS_USER else "skipped"
         self.state.record_activity(url, status, **info)
         return status
@@ -277,6 +367,42 @@ def cmd_set_password(args) -> int:
     state.unblock_login()
     state.save()
     print("Saved.")
+    return 0
+
+
+def cmd_set_gemini_key(args) -> int:
+    print("Get a free API key at https://aistudio.google.com/apikey (needs a Google account; you must be 18+).")
+    print("It is stored in Windows Credential Manager, not in any file.")
+    key = getpass.getpass("Gemini API key (not shown): ").strip()
+    if not key or any(c.isspace() for c in key):
+        print("Empty or has spaces in it. Nothing saved.")
+        return 1
+    credentials.save_secret(credentials.GEMINI_KEY, key)
+    config = load_config()
+    print("Saved. Checking it with Google...")
+    try:
+        name = Gemini(key, config.gemini_models, config.gemini_timeout_seconds).check()
+    except (GeminiError, ValueError) as e:
+        print(f"The key is saved, but the check failed: {e}")
+        return 1
+    print(f"OK: {name} answers with this key.")
+    return 0
+
+
+def cmd_set_discord_webhook(args) -> int:
+    print("In your own Discord server: Edit Channel > Integrations > Webhooks > New Webhook > Copy Webhook URL.")
+    print("Anyone with the URL can post to that channel, so it is stored in Windows Credential Manager.")
+    url = getpass.getpass("Webhook URL (not shown): ").strip()
+    if not discord_webhook.is_webhook_url(url):
+        print("That isn't a Discord webhook URL (https://discord.com/api/webhooks/<id>/<token>). Nothing saved.")
+        return 1
+    credentials.save_secret(credentials.DISCORD_WEBHOOK, url)
+    try:
+        discord_webhook.send(url, "autofill-forms is connected: course emails will show up here.")
+    except discord_webhook.PhoneError as e:
+        print(f"Saved, but the test message failed: {e}")
+        return 1
+    print("Saved, and a test message was sent: check your phone.")
     return 0
 
 
@@ -304,9 +430,9 @@ def cmd_scan(args) -> int:
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(timeout)
         outlook_web.open_inbox(page, config.outlook_url, timeout)
-        items = outlook_web.list_moodle_emails(page, config.moodle_sender, since, max_scrolls=30)
+        items = outlook_web.list_course_emails(page, config.sender_domain_prefix, since, max_scrolls=30)
         state = State(STATE_FILE)
-        print(f"{len(items)} email(s) from {config.moodle_sender} since {since:%Y-%m-%d}.\n")
+        print(f"{len(items)} email(s) from *@{config.sender_domain_prefix}* since {since:%Y-%m-%d}.\n")
         for item in items:
             hints = email_hints(item.label, config.keywords)
             status = state.email_status(item.conv_id)
@@ -314,7 +440,7 @@ def cmd_scan(args) -> int:
             if not hints:
                 print(f"{when}  {'ignore':<12} {item.label[:90]}")
                 continue
-            email = outlook_web.read_email(page, item, timeout)
+            email = outlook_web.read_email(page, item, timeout, keep_unread=config.keep_unread)
             hints = email_hints(f"{email.subject}\n{email.body}", config.keywords) or hints
             keywords = [k for hint in hints for k in config.keywords[hint.value]]
             kind, url = pick_target(email.links, config.moodle_url, keywords)
@@ -366,7 +492,7 @@ def cmd_open(args) -> int:
     with browser(config, args.headed) as context:
         runner = Runner(config, context, args.dry_run)
         try:
-            status = runner.process_activity(url, frozenset(), "")
+            status = runner.process_activity(url, None, frozenset())
         except StopMoodle as e:
             print(e)
             return 1
@@ -384,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("set-password", help="store your CAS username and password in Windows Credential Manager")
+    sub.add_parser("set-gemini-key", help="store your Gemini API key in Windows Credential Manager")
+    sub.add_parser("set-discord-webhook", help="store the Discord webhook for phone messages and send a test")
     browse = sub.add_parser("browse", help="open the script's browser to log in and save page snapshots")
     browse.add_argument("url", nargs="?", help="start page (default: Outlook on the web)")
     scan = sub.add_parser("scan", help="list course emails and their form links (opens matching emails)")
@@ -401,7 +529,8 @@ def main(argv: list[str] | None = None) -> int:
 
     setup_logging(args.verbose)
     commands = {
-        "set-password": cmd_set_password, "browse": cmd_browse, "scan": cmd_scan,
+        "set-password": cmd_set_password, "set-gemini-key": cmd_set_gemini_key,
+        "set-discord-webhook": cmd_set_discord_webhook, "browse": cmd_browse, "scan": cmd_scan,
         "run": cmd_run, "watch": cmd_watch, "open": cmd_open,
     }
     try:

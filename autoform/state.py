@@ -6,8 +6,11 @@ import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .models import Analysis, Category
+
 # A recorded email/activity in one of these states is never looked at again.
-FINAL = {"submitted", "skipped", "needs_user", "failed"}
+# "informed": an email without a form to answer, whose message went to your phone.
+FINAL = {"submitted", "skipped", "needs_user", "failed", "informed"}
 MAX_FAILURES = 3
 KEEP_DAYS = 120
 RETRY_SECONDS = 120  # how often a form that isn't open yet is looked at again
@@ -33,6 +36,19 @@ class State:
 
     def activity_done(self, url: str) -> bool:
         return self.activities.get(url, {}).get("status") in FINAL
+
+    def email_summary(self, message_id: str) -> Analysis | None:
+        """What the email was found to be about when it was first read (None if it wasn't yet)."""
+        entry = self.emails.get(message_id, {})
+        try:
+            return Analysis(Category(entry["category"]), entry.get("message", ""), source=entry.get("source", "gemini"))
+        except (KeyError, ValueError):
+            return None
+
+    def email_waiting(self, message_id: str) -> bool:
+        """True while the email's form isn't open yet and isn't due for another look (no need to reopen it)."""
+        entry = self.emails.get(message_id, {})
+        return entry.get("status") == "retry" and bool(entry.get("url")) and not self.activity_due(entry["url"])
 
     def activity_due(self, url: str) -> bool:
         """False while a not-yet-open form is waiting for its next check."""

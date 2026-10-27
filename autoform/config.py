@@ -33,8 +33,12 @@ class Config:
     page_timeout_seconds: int
     keywords: dict[str, tuple[str, ...]]
     outlook_url: str
-    moodle_sender: str
+    sender_domain_prefix: str
+    keep_unread: bool
     poll_seconds: int
+    gemini_models: tuple[str, ...]
+    gemini_timeout_seconds: int
+    gemini_min_interval_seconds: float
 
     @property
     def moodle_host(self) -> str:
@@ -61,6 +65,10 @@ def _strings(data: dict, key: str, where: str) -> tuple[str, ...]:
 def load_config(path: Path = CONFIG_FILE) -> Config:
     data = _read_yaml(path)
     keywords = data.get("keywords") or {}
+    gemini = data.get("gemini") or {}
+    sender_domain_prefix = str(data.get("sender_domain_prefix") or "").strip()
+    if not sender_domain_prefix:
+        raise SetupError("config.yaml: sender_domain_prefix is empty")
     return Config(
         moodle_url=str(data.get("moodle_url", "https://courses.finki.ukim.mk")).rstrip("/"),
         cas_login_url=str(data["cas_login_url"]),
@@ -70,8 +78,12 @@ def load_config(path: Path = CONFIG_FILE) -> Config:
         page_timeout_seconds=int(data.get("page_timeout_seconds", 30)),
         keywords={kind: _strings(keywords, kind, "config.yaml keywords") for kind in ("midterm", "lab")},
         outlook_url=str(data.get("outlook_url", "https://outlook.office.com/mail/")),
-        moodle_sender=str(data.get("moodle_sender", "noreply@courses.finki.ukim.mk")),
+        sender_domain_prefix=sender_domain_prefix,
+        keep_unread=bool(data.get("keep_unread", True)),
         poll_seconds=max(10, int(data.get("poll_seconds", 30))),
+        gemini_models=_strings(gemini, "models", "config.yaml gemini"),
+        gemini_timeout_seconds=int(gemini.get("timeout_seconds", 30)),
+        gemini_min_interval_seconds=float(gemini.get("min_interval_seconds", 0)),
     )
 
 
@@ -90,6 +102,7 @@ def load_profile(folder: Path = PREFERENCES_DIR) -> Profile:
         other_programs=_strings(data, "other_programs", where),
         min_gap_minutes=int(lab.get("min_gap_minutes", 0)),
         prefer=str(lab.get("prefer", "earliest")),
+        private_words=_strings(data, "private_words", where),
     )
     if not profile.program_aliases:
         raise SetupError(f"{where}: program_aliases is empty")

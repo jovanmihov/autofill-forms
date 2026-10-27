@@ -9,8 +9,16 @@ page_timeout_seconds: 30
 
 # Outlook on the web, read in the script's own browser (you log in there once).
 outlook_url: https://outlook.office.com/mail/
-moodle_sender: noreply@courses.finki.ukim.mk   # only emails from this address are opened
-poll_seconds: 30                               # how often "watch" looks for new email
+sender_domain_prefix: courses.   # emails from any address @courses.* are opened (e.g. noreply@courses.finki.ukim.mk)
+keep_unread: true                # an email that was unread is marked unread again after the script opened it
+poll_seconds: 30                 # how often "watch" looks for new email
+
+# Gemini reads each new course email (free tier; the API key is stored with: py main.py set-gemini-key).
+# Without a saved key, the keyword classifier below is used instead.
+gemini:
+  models: [gemini-3.8-flash, gemini-3.5-flash-lite]   # tried in this order; the next one on errors or rate limits
+  timeout_seconds: 30
+  min_interval_seconds: 5   # at least this long between requests, to stay under the free per-minute limit
 
 # Email keywords, matched at the start of a word, case-insensitive.
 keywords:

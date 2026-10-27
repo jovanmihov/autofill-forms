@@ -1,5 +1,25 @@
 # autofill-forms: FINKI Moodle auto-form script
 
+## Status (2026-10-27)
+The first plan below read mail from **classic Outlook** (pywin32 COM). That turned out unusable: classic
+Outlook has no account set up on this PC, and Microsoft Graph needs FINKI admin approval. What exists instead:
+- Mail is read from **Outlook on the web** in the script's own Edge (Playwright, `autoform/browser/outlook_web.py`,
+  persistent profile in `browser-profile/`). Every email from an `@courses.*` address is opened; an email that
+  was unread is marked unread again (`keep_unread`).
+- **Gemini** (free tier, `autoform/gemini.py`, key in keyring via `set-gemini-key`) gets two kinds of request.
+  `read_email`: one course email on its own -> category (lab form, midterm form, other form, event, schedule
+  change, announcement, other) and a short phone message. `choose_option`: an open Moodle form's contents, the
+  email, the weekly schedule and the study program -> the option to choose. The choice is checked against a JSON
+  schema and the page's options, then by `decide.check_suggestion` with the same rules as before. Gemini failing
+  or its choice failing the checks means "needs you".
+  Without a key, the keyword classifier and `decide_form` work as before.
+- **Phone messages** go to a Discord webhook (`autoform/discord_webhook.py`, URL in keyring via
+  `set-discord-webhook`), next to the Windows toast (`notify.py`).
+- The scheduled task runs `main.py watch` at logon (polls every 30 s) instead of `run` every 3 minutes.
+README.md is the current user documentation. Sections below that mention classic Outlook or `outlook_reader.py`
+are kept as the original plan.
+
+
 ## Context
 Course forms show up on courses.finki.ukim.mk (Moodle, with CAS login at `https://cas.finki.ukim.mk/cas/login?service=https%3A%2F%2Fcourses.finki.ukim.mk%2Flogin%2Findex.php`). The site's home page can be viewed without logging in and has a login button. The notification for each form arrives by email in **classic Outlook desktop** (Office16 is installed on this PC). There are two kinds of form to fill in automatically:
 1. **Midterm attendance** ("will you attend the колоквиум?"). Always answer **Yes** if it's for the user's study program.
@@ -21,17 +41,20 @@ preferences.example/        committed, fake data
   schedule.txt              e.g. "Понеделник 08:00-10:00 Веб програмирање"
 preferences/                GITIGNORED, the user's real copy of preferences.example/
 autoform/
-  outlook_reader.py         pywin32 COM: scan the Inbox of every Outlook account, extract Moodle links
+  outlook_reader.py         (dropped) pywin32 COM; replaced by browser/outlook_web.py (Outlook on the web)
+  gemini.py                 Gemini API client: classify each email, phone message, suggested option (validated)
+  discord_webhook.py        phone messages through a Discord webhook
   classifier.py             midterm / lab / ignore (email keywords, then confirmed by the shape of the options)
   schedule.py               parse schedule.txt + slot labels, check for overlaps (pure, no I/O)
   decide.py                 pick the option for midterm/lab forms (pure, works on plain Option dataclasses)
   models.py                 dataclasses shared by the modules (Email, Option, Decision…)
   state.py                  state.json of processed emails/activities (so nothing is submitted twice)
-  notify.py                 Windows toast + log line
-  credentials.py            keyring get/set for the CAS username + password
+  notify.py                 Windows toast + phone message + log line
+  credentials.py            keyring get/set for the CAS login, the Gemini key and the Discord webhook
   browser/                  ALL Playwright code lives here, nowhere else
     session.py              launch_persistent_context("browser-profile/"), CAS login
     moodle_form.py          open activity, read options -> list[Option], select, submit, verify, screenshot
+    outlook_web.py          Outlook on the web: list course emails, read one, restore unread
 tests/                      pytest for schedule/classifier/decide, fake data only
 install_task.ps1            registers the scheduled task (every 3 min, pythonw, only when logged on)
 requirements.txt            pywin32, playwright, pyyaml, keyring, win11toast, pytest (already exists)

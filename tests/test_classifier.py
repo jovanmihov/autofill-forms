@@ -1,7 +1,7 @@
 import pytest
 
-from autoform.classifier import confirm_type, email_hints, find_phrases, is_yes, options_shape
-from autoform.models import FormType, Option
+from autoform.classifier import confirm_type, email_hints, find_phrases, is_yes, keyword_analysis, options_shape
+from autoform.models import Category, FormType, Option
 
 KEYWORDS = {
     "midterm": ["колоквиум", "kolokvium", "midterm", "парцијал", "parcijal"],
@@ -78,3 +78,13 @@ def test_confirm_type_disagreement_is_refused():
 
 def test_confirm_type_without_email_trusts_options():
     assert confirm_type(frozenset(), opts("Да", "Не"))[0] is FormType.MIDTERM
+
+
+# --- keyword fallback when Gemini isn't available ----------------------------
+
+def test_keyword_analysis():
+    lab = keyword_analysis("Анкета  за термин\nза лаб. вежби", frozenset({FormType.LAB}), has_form=True)
+    assert (lab.category, lab.message, lab.source) == (Category.LAB_FORM, "Анкета за термин за лаб. вежби", "keywords")
+    both = keyword_analysis("x", frozenset({FormType.LAB, FormType.MIDTERM}), has_form=True)
+    assert both.category is Category.OTHER_FORM
+    assert keyword_analysis("Предавање", frozenset({FormType.LAB}), has_form=False).category is Category.OTHER

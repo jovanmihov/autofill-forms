@@ -1,5 +1,5 @@
-from autoform.decide import decide_form, decide_lab, decide_midterm
-from autoform.models import Action, FormPage, FormType, Option, PageStatus, Profile
+from autoform.decide import check_suggestion, decide_form, decide_lab, decide_midterm
+from autoform.models import Action, Analysis, Category, FormPage, FormType, Option, PageStatus, Profile
 from autoform.schedule import parse_schedule
 
 PROFILE = Profile(
@@ -151,3 +151,92 @@ def test_form_not_open_yet_is_retried():
 
 def test_form_closed_is_skipped():
     assert decide_form(LAB, page(status=PageStatus.CLOSED), "", PROFILE, BUSY).action is Action.SKIP
+
+
+# --- Gemini's suggestion, checked by the same rules ---------------------------
+
+def gemini(category, option=None):
+    return Analysis(Category(category), "message", option_value=option)
+
+
+def suggest(category, option, form, text=""):
+    return check_suggestion(gemini(category, option), form, text, PROFILE, BUSY)
+
+
+def test_suggested_midterm_yes_for_my_program_is_submitted():
+    d = suggest("midterm_form", "0", page("Да, ќе присуствувам", "Не"), "Колоквиум за ПИТ")
+    assert (d.action, d.option.label) == (Action.SUBMIT, "Да, ќе присуствувам")
+
+
+def test_suggested_midterm_no_is_left_to_the_user():
+    d = suggest("midterm_form", "1", page("Да", "Не"))
+    assert d.action is Action.NEEDS_USER
+    assert "'Не'" in d.reason and "'Да'" in d.reason
+
+
+def test_suggested_midterm_yes_for_another_program_is_left_to_the_user():
+    d = suggest("midterm_form", "0", page("Да", "Не"), "Колоквиум за студентите од КН")
+    assert d.action is Action.NEEDS_USER
+    assert "skip" in d.reason
+
+
+def test_midterm_for_another_program_skipped_when_both_agree():
+    assert suggest("midterm_form", None, page("Да", "Не"), "Колоквиум за студентите од КН").action is Action.SKIP
+
+
+def test_midterm_the_checks_cant_settle_is_left_to_the_user():
+    assert suggest("midterm_form", "0", page("Да, во 10", "Да, во 12", "Не")).action is Action.NEEDS_USER
+
+
+def test_suggested_free_lab_slot_is_submitted():
+    d = suggest("lab_form", "1", page("Понеделник 08-10", "Вторник 08-10"))
+    assert (d.action, d.form_type, d.option.label) == (Action.SUBMIT, FormType.LAB, "Вторник 08-10")
+    assert not d.notes
+
+
+def test_suggested_free_lab_slot_that_isnt_the_preferred_one_is_submitted_with_a_note():
+    d = suggest("lab_form", "2", page("Понеделник 08-10", "Вторник 08-10", "Петок 10-12"))
+    assert (d.action, d.option.label) == (Action.SUBMIT, "Петок 10-12")
+    assert "would pick 'Вторник 08-10'" in d.notes[0]
+
+
+def test_suggested_lab_slot_that_clashes_is_left_to_the_user():
+    d = suggest("lab_form", "0", page("Понеделник 08-10", "Вторник 08-10"))
+    assert d.action is Action.NEEDS_USER
+    assert "clashes" in d.reason
+
+
+def test_suggested_full_lab_slot_is_left_to_the_user():
+    form = FormPage(url="u", options=(Option("1", "Вторник 08-10", disabled=True), Option("2", "Петок 10-12")))
+    d = check_suggestion(gemini("lab_form", "1"), form, "", PROFILE, BUSY)
+    assert d.action is Action.NEEDS_USER
+    assert "full" in d.reason
+
+
+def test_lab_without_a_suggestion_is_left_to_the_user():
+    d = suggest("lab_form", None, page("Понеделник 08-10", "Вторник 08-10"))
+    assert d.action is Action.NEEDS_USER
+    assert "'Вторник 08-10'" in d.reason
+
+
+def test_suggested_option_must_be_on_the_page():
+    d = suggest("lab_form", "7", page("Понеделник 08-10", "Вторник 08-10"))
+    assert d.action is Action.NEEDS_USER
+    assert d.option is None
+
+
+def test_other_kinds_of_form_are_left_to_the_user():
+    assert suggest("other_form", None, page("Вторник 08-10", "Петок 10-12")).action is Action.NEEDS_USER
+    assert suggest("announcement", None, page("Да", "Не")).action is Action.NEEDS_USER
+
+
+def test_category_must_match_the_options():
+    d = suggest("lab_form", "0", page("Да", "Не"))
+    assert d.action is Action.NEEDS_USER
+    assert d.option is None
+
+
+def test_page_checks_come_first():
+    assert suggest("lab_form", "0", page("Вторник 08-10", already_answered=True)).action is Action.SKIP
+    assert suggest("lab_form", None, page(status=PageStatus.NOT_OPEN_YET)).action is Action.RETRY
+    assert suggest("lab_form", None, page(status=PageStatus.CLOSED)).action is Action.SKIP

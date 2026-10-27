@@ -9,7 +9,7 @@ import re
 from collections.abc import Iterable, Mapping
 from functools import lru_cache
 
-from .models import FormType, Option
+from .models import Analysis, Category, FormType, Option
 from .schedule import normalize, parse_slot
 
 YES_WORDS = ("да", "yes", "da", "ќе присуствувам", "присуствувам")
@@ -63,6 +63,16 @@ def describe_hints(hints: frozenset[FormType]) -> str:
     if len(hints) == 1:
         return next(iter(hints)).value
     return "midterm/lab?"
+
+
+def keyword_analysis(subject: str, hints: frozenset[FormType], has_form: bool) -> Analysis:
+    """Without Gemini: the category from the keywords, and the subject as the phone message."""
+    category = Category.OTHER
+    if has_form:
+        category = {FormType.LAB: Category.LAB_FORM, FormType.MIDTERM: Category.MIDTERM_FORM}.get(
+            next(iter(hints)) if len(hints) == 1 else None, Category.OTHER_FORM
+        )
+    return Analysis(category, " ".join(subject.split())[:200], source="keywords")
 
 
 def options_shape(options: Iterable[Option]) -> FormType | None:
