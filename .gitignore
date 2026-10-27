@@ -1,0 +1,12 @@
+# Personal data: never commit
+preferences/
+state.json
+state.json.tmp
+logs/
+browser-profile/
+
+# Environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc

@@ -1,0 +1,22 @@
+# Example with made-up data. Copy this folder to preferences/ (gitignored) and put your real data there.
+
+# How your study program is written in forms and emails. Whole words, case-insensitive.
+program_aliases:
+  - ПИТ
+  - Примена на информациски технологии
+  - PIT
+
+# The other study programs. A midterm form that names only these (and none of yours) is skipped.
+# Avoid short acronyms that are also everyday words, e.g. "КЕ" (people write "ке" for "ќе").
+other_programs:
+  - СИИС
+  - Софтверско инженерство и информациски системи
+  - КН
+  - Компјутерски науки
+  - ИМБ
+  - Интернет, мрежи и безбедност
+  - Компјутерско инженерство
+
+lab:
+  min_gap_minutes: 0   # free minutes needed between a lab and a class
+  prefer: earliest     # earliest | latest

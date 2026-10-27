@@ -1,0 +1,18 @@
+# Generic settings, safe to commit. Personal data goes in preferences/ (see preferences.example/).
+moodle_url: https://courses.finki.ukim.mk
+cas_login_url: https://cas.finki.ukim.mk/cas/login?service=https%3A%2F%2Fcourses.finki.ukim.mk%2Flogin%2Findex.php
+
+lookback_days: 3          # how far back in the Inbox to look on each run
+headless: true            # false shows the browser window (same as --headed)
+browser_channel: msedge   # the installed Microsoft Edge; leave empty to use Playwright's own Chromium
+page_timeout_seconds: 30
+
+# Outlook on the web, read in the script's own browser (you log in there once).
+outlook_url: https://outlook.office.com/mail/
+moodle_sender: noreply@courses.finki.ukim.mk   # only emails from this address are opened
+poll_seconds: 30                               # how often "watch" looks for new email
+
+# Email keywords, matched at the start of a word, case-insensitive.
+keywords:
+  midterm: [колоквиум, kolokvium, midterm, парцијал, parcijal]
+  lab: [лабораториск, лаб. вежби, термин, lab, laboratorisk, termin]
