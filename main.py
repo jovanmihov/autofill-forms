@@ -12,7 +12,10 @@ from pathlib import Path
 _VENV = Path(__file__).resolve().parent / ".venv"
 if (_VENV / "Scripts" / "python.exe").exists() and Path(sys.prefix).resolve() != _VENV:
     _exe = "pythonw.exe" if Path(sys.executable).name.lower() == "pythonw.exe" else "python.exe"
-    sys.exit(subprocess.call([str(_VENV / "Scripts" / _exe), __file__, *sys.argv[1:]]))
+    try:
+        sys.exit(subprocess.call([str(_VENV / "Scripts" / _exe), __file__, *sys.argv[1:]]))
+    except KeyboardInterrupt:  # Ctrl+C reaches the .venv process too, which stops on its own
+        sys.exit(130)
 
 import argparse
 import getpass
@@ -24,7 +27,7 @@ from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
 from autoform import credentials, discord_webhook
-from autoform.classifier import describe_hints, email_hints, keyword_analysis
+from autoform.classifier import course_code, describe_hints, email_hints, keyword_analysis
 from autoform.config import (
     LOGS_DIR, STATE_FILE, Config, SetupError, check_not_example, load_config, load_profile, load_schedule,
 )
@@ -112,6 +115,7 @@ class Runner:
         self.dry_run = dry_run
         self.state = State(STATE_FILE)
         self.timeout = config.page_timeout_seconds * 1000
+        self.context = context
         self.outlook = context.pages[0] if context.pages else context.new_page()
         self.moodle = context.new_page()
         for page in (self.outlook, self.moodle):
@@ -140,7 +144,19 @@ class Runner:
             return
         self.profile, self.busy = profile, busy
 
-    def tell(self, title: str, message: str, link: str | None = None) -> None:
+    def reopened(self, page):
+        """The same tab, or a new one if it was closed (e.g. in the --headed window)."""
+        if not page.is_closed():
+            return page
+        log.info("a browser tab was closed; opening a new one")
+        page = self.context.new_page()
+        page.set_default_timeout(self.timeout)
+        return page
+
+    def tell(self, title: str, message: str, link: str | None = None, email: Email | None = None) -> None:
+        """With email, the title also says which course and who it is from: "Lab · Аипс · Georgiev Pece"."""
+        if email:
+            title = " · ".join(filter(None, (title, course_code(email.subject), email.sender)))
         if self.dry_run:
             print(f"  [dry run] would notify (PC + phone): {title}: {message}{f'  {link}' if link else ''}")
         else:
@@ -185,6 +201,7 @@ class Runner:
     def goto_moodle(self, url: str) -> None:
         from autoform.browser.session import LoginFailed, goto_moodle
 
+        self.moodle = self.reopened(self.moodle)
         try:
             goto_moodle(self.moodle, url, self.config.moodle_url, self.config.cas_login_url, self.cas_credentials)
         except LoginFailed as e:
@@ -198,6 +215,7 @@ class Runner:
     def open_outlook(self) -> None:
         from autoform.browser import outlook_web
 
+        self.outlook = self.reopened(self.outlook)
         outlook_web.open_inbox(self.outlook, self.config.outlook_url, self.timeout)
 
     def check_mail(self, since: datetime, max_scrolls: int) -> None:
@@ -234,7 +252,9 @@ class Runner:
         # Asked once per email: a form that isn't open yet brings the email back every few minutes.
         summary = self.state.email_summary(item.conv_id) or self.read_email(email, hints, kind in ("activity", "several"))
         link = url
-        if kind == "forum" and (hints or summary.category in FORM_KINDS):
+        # Gemini read the whole email; keywords also match a "колоквиум" mentioned in passing.
+        about_a_form = summary.category in FORM_KINDS if summary.source == "gemini" else bool(hints)
+        if kind == "forum" and about_a_form:
             # A form email that only links to its forum post: the form link is in the post.
             self.goto_moodle(url)
             kind, url = pick_target(moodle_form.post_links(self.moodle), self.config.moodle_url, keywords)
@@ -245,19 +265,19 @@ class Runner:
         if kind == "activity":
             status = self.process_activity(url, email, hints, summary)
         else:
-            status = self.inform(summary, kind, link)
+            status = self.inform(summary, kind, link, email)
         if not self.dry_run:
             self.state.record_email(
                 item.conv_id, status, subject=email.subject, url=url if kind == "activity" else None,
                 category=summary.category.value, message=summary.message, source=summary.source,
             )
 
-    def inform(self, summary: Analysis, kind: str, link: str | None) -> str:
+    def inform(self, summary: Analysis, kind: str, link: str | None, email: Email) -> str:
         """An email without one Moodle form to answer: tell the user what it is about."""
         if kind == "several":
-            self.tell("Needs you", f"{summary.message} (it links several forms: answer them yourself)", link)
+            self.tell("Needs you", f"{summary.message} (it links several forms: answer them yourself)", link, email)
             return "needs_user"
-        self.tell(TITLES[summary.category], summary.message, link)
+        self.tell(TITLES[summary.category], summary.message, link, email)
         return "informed"
 
     # --- Moodle form -------------------------------------------------------
@@ -279,20 +299,20 @@ class Runner:
         self.show("form", choice)
         return check_suggestion(choice, page, email_text, self.profile, self.busy), choice
 
-    def report(self, decision: Decision, what: str, url: str, saved: bool = True) -> None:
+    def report(self, decision: Decision, what: str, url: str, email: Email | None, saved: bool = True) -> None:
         """The notification (PC + phone) for a form's outcome."""
         kind = decision.form_type.value.title() if decision.form_type else "Form"
         choice = decision.option.label if decision.option else ""
         if decision.action is Action.SUBMIT and saved:
-            self.tell(kind, f"{what}. I chose {choice} for you.", url)
+            self.tell(kind, f"{what}. I chose {choice} for you.", url, email)
         elif decision.action is Action.SUBMIT:
-            self.tell("Needs you", f"{what}: saved {choice!r}, but Moodle doesn't show it. Please check.", url)
+            self.tell("Needs you", f"{what}: saved {choice!r}, but Moodle doesn't show it. Please check.", url, email)
         elif decision.action is Action.RETRY:
-            self.tell("Waiting for a form", f"{what}: not open yet, checking every {RETRY_SECONDS // 60} min", url)
+            self.tell("Waiting for a form", f"{what}: not open yet, checking every {RETRY_SECONDS // 60} min", url, email)
         elif decision.action is Action.NEEDS_USER:
-            self.tell("Needs you", f"{what}: {decision.reason}", url)
+            self.tell("Needs you", f"{what}: {decision.reason}", url, email)
         else:
-            self.tell(kind, f"{what}: nothing to do ({decision.reason})", url)
+            self.tell(kind, f"{what}: nothing to do ({decision.reason})", url, email)
 
     def process_activity(self, url: str, email: Email | None, hints: frozenset[FormType],
                          summary: Analysis | None = None) -> str:
@@ -304,7 +324,7 @@ class Runner:
             return "retry"
         if not is_choice(url):
             what = summary.message if summary else "A form"
-            self.tell("Needs you", f"{what} (not a Moodle Choice, so fill it in yourself)", url)
+            self.tell("Needs you", f"{what} (not a Moodle Choice, so fill it in yourself)", url, email)
             if not self.dry_run:
                 self.state.record_activity(url, "needs_user", reason="not a Choice activity")
             return "needs_user"
@@ -330,7 +350,7 @@ class Runner:
             for note in decision.notes:
                 print(f"    {note}")
             print(f"  saved {shot} and .html")
-            self.report(decision, what, url)
+            self.report(decision, what, url, email)
             return "dry_run"
 
         info = {"title": page.title, "type": kind, "reason": decision.reason}
@@ -339,15 +359,15 @@ class Runner:
         if decision.action is Action.SUBMIT:
             saved = moodle_form.submit_choice(self.moodle, url, decision.option)
             shot = moodle_form.save_evidence(self.moodle, FORMS_DIR, f"submitted-{page.title}")
-            self.report(decision, what, url, saved)
+            self.report(decision, what, url, email, saved)
             status = "submitted" if saved else "needs_user"
             self.state.record_activity(url, status, choice=choice, screenshot=str(shot), **info)
             return status
         if decision.action is Action.RETRY:
             if self.state.record_retry(url, **info):
-                self.report(decision, what, url)
+                self.report(decision, what, url, email)
             return "retry"
-        self.report(decision, what, url)
+        self.report(decision, what, url, email)
         status = "needs_user" if decision.action is Action.NEEDS_USER else "skipped"
         self.state.record_activity(url, status, **info)
         return status
@@ -535,6 +555,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     try:
         return commands[args.command](args)
+    except KeyboardInterrupt:
+        print("Stopped.")
+        return 130
     except SetupError as e:
         log.error("%s", e)  # the console handler shows it too
         if args.command in ("run", "watch") and not getattr(args, "dry_run", False):

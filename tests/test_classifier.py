@@ -1,6 +1,8 @@
 import pytest
 
-from autoform.classifier import confirm_type, email_hints, find_phrases, is_yes, keyword_analysis, options_shape
+from autoform.classifier import (
+    confirm_type, course_code, email_hints, find_phrases, is_yes, keyword_analysis, options_shape, without_course,
+)
 from autoform.models import Category, FormType, Option
 
 KEYWORDS = {
@@ -88,3 +90,22 @@ def test_keyword_analysis():
     both = keyword_analysis("x", frozenset({FormType.LAB, FormType.MIDTERM}), has_form=True)
     assert both.category is Category.OTHER_FORM
     assert keyword_analysis("Предавање", frozenset({FormType.LAB}), has_form=False).category is Category.OTHER
+    # The course code is shown in the title, so it is left out of the message.
+    assert keyword_analysis("Вис-2026/2027/Z-49_42836: Анкета", frozenset(), has_form=False).message == "Анкета"
+
+
+@pytest.mark.parametrize(
+    "subject, code, rest",
+    [
+        ("Аипс-2026/2027/Z-49_45136: Re: Лабораториски вежби", "Аипс", "Re: Лабораториски вежби"),
+        ("ОнВД-25/26: Re: Резултати", "ОнВД", "Re: Резултати"),
+        ("SIC: ОДЛУКА од Дисциплинска комисија", "SIC", "ОДЛУКА од Дисциплинска комисија"),
+        ("New sign in to your СИСТЕМ ЗА КУРСЕВИ НА ФИНКИ account", "", None),
+        ("New message from Михова Марија", "", None),
+        ("Re: Корекција на термини", "", None),
+        ("Колоквиум во 10:30 часот", "", None),
+    ],
+)
+def test_course_code(subject, code, rest):
+    assert course_code(subject) == code
+    assert without_course(subject) == (rest or subject)

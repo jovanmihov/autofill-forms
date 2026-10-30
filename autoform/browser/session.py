@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
-from playwright.sync_api import BrowserContext, Error, Page, sync_playwright
+from playwright.sync_api import BrowserContext, Page, sync_playwright
 
 from ..config import BROWSER_PROFILE_DIR
 
@@ -37,8 +37,8 @@ def open_context(headless: bool = True, channel: str | None = None) -> Iterator[
         finally:
             try:
                 context.close()
-            except Error:
-                pass  # the user already closed the window
+            except Exception:
+                pass  # the user already closed the window, or Ctrl+C also stopped Playwright's driver
 
 
 def _needs_login(page: Page, moodle_url: str, cas_url: str) -> bool:

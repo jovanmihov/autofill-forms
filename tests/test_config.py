@@ -33,4 +33,4 @@ def test_course_senders_and_gemini_settings():
 
 
 def test_example_private_words_are_made_up():
-    assert any("example.edu" in word for word in load_profile(EXAMPLE_DIR).private_words)
+    assert load_profile(EXAMPLE_DIR).private_words == ("Петар Петровски", "Petar Petrovski")

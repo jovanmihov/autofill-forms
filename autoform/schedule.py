@@ -43,10 +43,11 @@ _RANGE_RE = re.compile(
     r"(?P<h2>\d{1,2})(?:[:.](?P<m2>\d{2}))?(?![\d:]))"
 )
 
-# Sanity bounds for a class slot, used to reject room numbers and group numbers.
-_EARLIEST = 6 * 60
-_LATEST = 23 * 60
-_MAX_LENGTH = 6 * 60
+# (earliest start, latest end, longest) in minutes. A form option's slot gets sanity bounds, used to
+# reject room numbers and group numbers; schedule.txt is yours, so any part of a day counts there
+# (sleep, a whole day at work).
+_OPTION_BOUNDS = (6 * 60, 23 * 60, 6 * 60)
+_SCHEDULE_BOUNDS = (0, 24 * 60, 24 * 60)
 
 
 def normalize(text: str) -> str:
@@ -80,15 +81,16 @@ def _dates(text: str) -> set[date]:
     return found
 
 
-def _time_range(text: str) -> tuple[int, int] | None:
+def _time_range(text: str, bounds: tuple[int, int, int]) -> tuple[int, int] | None:
+    earliest, latest, max_length = bounds
     ranges: dict[tuple[int, int], bool] = {}
     for m in _RANGE_RE.finditer(text):
         h1, h2 = int(m["h1"]), int(m["h2"])
         m1, m2 = int(m["m1"] or 0), int(m["m2"] or 0)
-        if h1 > 23 or h2 > 23 or m1 > 59 or m2 > 59:
+        if h1 > 23 or h2 > 24 or m1 > 59 or m2 > 59:
             continue
         start, end = h1 * 60 + m1, h2 * 60 + m2
-        if not (_EARLIEST <= start < end <= _LATEST and end - start <= _MAX_LENGTH):
+        if not (earliest <= start < end <= latest and end - start <= max_length):
             continue
         has_minutes = m["m1"] is not None or m["m2"] is not None
         ranges[(start, end)] = ranges.get((start, end), False) or has_minutes
@@ -97,12 +99,13 @@ def _time_range(text: str) -> tuple[int, int] | None:
     return candidates[0] if len(candidates) == 1 else None
 
 
-def parse_slot(label: str) -> Slot | None:
+def parse_slot(label: str, *, any_time: bool = False) -> Slot | None:
     """Read a weekday and a time range out of a label, or None if unclear.
 
     The weekday comes from a day name or a dd.mm.yyyy date. A label whose
     date and day name disagree, or that has several days or time ranges,
-    is treated as unreadable rather than guessed.
+    is treated as unreadable rather than guessed. Without any_time, a range
+    outside 06:00-23:00 or longer than 6 hours doesn't count as a time.
     """
     text = normalize(label)
     dates = _dates(text)
@@ -117,22 +120,28 @@ def parse_slot(label: str) -> Slot | None:
         days = {day.weekday()}
     if len(days) != 1:
         return None
-    times = _time_range(text_without_dates)
+    times = _time_range(text_without_dates, _SCHEDULE_BOUNDS if any_time else _OPTION_BOUNDS)
     if times is None:
         return None
     return Slot(weekday=days.pop(), start=times[0], end=times[1], day=day, label=label.strip())
 
 
 def parse_schedule(text: str) -> list[Slot]:
-    """Parse schedule.txt: one "<day> <HH:MM>-<HH:MM> <what>" per line, # comments."""
+    """Parse schedule.txt: one "<day> <HH:MM>-<HH:MM> <what>" per line, # comments.
+
+    Any time from 00:00 to 24:00 counts, so sleep or a busy day can go in too.
+    """
     busy = []
     for number, line in enumerate(text.splitlines(), start=1):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
-        slot = parse_slot(line)
+        slot = parse_slot(line, any_time=True)
         if slot is None:
-            raise ValueError(f"schedule.txt line {number}: can't read a day and time range in {line!r}")
+            raise ValueError(
+                f"schedule.txt line {number}: can't read a day and time range in {line!r}"
+                " (write <day> <HH:MM>-<HH:MM> <what>; a night goes on two lines, e.g. 23:00-24:00 and 00:00-08:00)"
+            )
         busy.append(slot)
     return busy
 

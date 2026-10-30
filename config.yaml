@@ -16,7 +16,9 @@ poll_seconds: 30                 # how often "watch" looks for new email
 # Gemini reads each new course email (free tier; the API key is stored with: py main.py set-gemini-key).
 # Without a saved key, the keyword classifier below is used instead.
 gemini:
-  models: [gemini-3.8-flash, gemini-3.5-flash-lite]   # tried in this order; the next one on errors or rate limits
+  # Tried in this order; the next one on errors or rate limits. Flash-Lite first: it answers in a few
+  # seconds, while Flash often timed out (504) or was overloaded (503) on the free tier.
+  models: [gemini-3.5-flash-lite, gemini-3.8-flash]
   timeout_seconds: 30
   min_interval_seconds: 5   # at least this long between requests, to stay under the free per-minute limit
 

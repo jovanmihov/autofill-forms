@@ -21,10 +21,9 @@ lab:
   min_gap_minutes: 0   # free minutes needed between a lab and a class
   prefer: earliest     # earliest | latest
 
-# Your name (every spelling, Cyrillic and Latin), email address and index number. They are
-# replaced with [student] before an email's text goes to Gemini. Any email address is removed anyway.
+# Your name in every spelling (Cyrillic and Latin), and anything else that identifies you. It is
+# replaced with [student] before an email's text goes to Gemini. Email addresses, IP addresses and
+# 6-digit numbers (index numbers) are removed anyway, whoever they belong to.
 private_words:
   - Петар Петровски
   - Petar Petrovski
-  - petar.petrovski@students.example.edu
-  - "201234"

@@ -1,6 +1,7 @@
 # Example with made-up data. Your weekly classes, one per line: <day> <HH:MM>-<HH:MM> <what>
 # Days in Macedonian or English, full or short (Понеделник / Пон / Monday / Mon).
-# Add any other time you're not free (work, travel) the same way. Text after # is ignored.
+# Add any other time you're not free (work, sleep, travel) the same way, at any hour: Понеделник 00:00-09:00 Спиење.
+# A night goes on two lines (Понеделник 23:00-24:00, Вторник 00:00-08:00). Text after # is ignored.
 Понеделник 08:00-10:00 Веб програмирање
 Понеделник 10:00-12:00 Бази на податоци
 Вторник 12:00-14:00 Оперативни системи

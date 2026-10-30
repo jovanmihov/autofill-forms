@@ -68,8 +68,18 @@ def fake(*replies, models=("model-a", "model-b")):
 # --- personal data -------------------------------------------------------------
 
 def test_redact_removes_own_name_index_and_every_address():
-    text = redact("Petar  PETROVSKI, petar.petrovski@students.example.edu, 201234, 2012345, prof@example.edu", PROFILE.private_words)
-    assert text == "[student], [student], [student], 2012345, [email]"
+    text = redact("Petar  PETROVSKI, petar.petrovski@students.example.edu, 2012345, prof@example.edu", PROFILE.private_words)
+    assert text == "[student], [student], 2012345, [email]"
+
+
+def test_redact_removes_ip_addresses_and_anyones_index_number():
+    text = redact("Your account: 201234\nIP: 192.0.2.17 / 2001:db8:85a3::8a2e:370:7334\nМарко Марковски со број на индекс 209999", ())
+    assert text == "Your account: [index]\nIP: [ip] / [ip]\nМарко Марковски со број на индекс [index]"
+
+
+def test_redact_keeps_times_dates_rooms_and_course_codes():
+    text = "Понеделник 08:00-10:00 и 10:20:30, 26.10.2026, Лаб 215, Z-49_45136, 2026/2027"
+    assert redact(text, ()) == text
 
 
 def test_text_cannot_close_the_delimiters():

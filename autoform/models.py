@@ -43,6 +43,7 @@ class Email:
     body: str  # plain text
     received: datetime | None  # local time, None if Outlook's date format wasn't understood
     links: tuple[tuple[str, str], ...] = ()  # (url, link text)
+    sender: str = ""  # the teacher (or anyone) Moodle sent it for; "" for Moodle's own notices
 
 
 @dataclass(frozen=True)

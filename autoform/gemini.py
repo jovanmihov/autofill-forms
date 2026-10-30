@@ -31,6 +31,12 @@ MAX_MESSAGE_CHARS = 200
 _DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_IP_RE = re.compile(
+    r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])"           # IPv4
+    r"|(?<![\w:])(?:[0-9a-f]{0,4}:){3,7}[0-9a-f]{1,4}(?![\w:])",  # IPv6 (4+ groups, so not a time like 10:20)
+    re.IGNORECASE,
+)
+_INDEX_RE = re.compile(r"(?<!\d)\d{6}(?!\d)")  # FINKI index numbers (also the Moodle username) have 6 digits
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _TAG_RE = re.compile(r"</?\s*(?:email|form)\s*>", re.IGNORECASE)  # our own delimiters, if the text fakes them
 
@@ -52,7 +58,9 @@ Say what the email is about, as JSON:
   announcement: other course news (results, materials, deadlines, rules)
   other: anything else
 - message: one short English sentence for the student's phone, at most 120 characters. Say what matters: \
-the course, what happens and when. Examples: "Free AI workshop on Nov 18 at 17:00", \
+what happens and when, and the course's full name if the email gives it. The course code from the subject \
+(e.g. "Аипс-2026/2027/Z-49_45136") and the sender are shown next to your message, so leave them out. \
+Examples: "Free AI workshop on Nov 18 at 17:00", \
 "Web Programming lecture moved to Wed 17:00", "Lab term survey for Operating Systems". No links.
 - reason: a few words on why you chose the category."""
 
@@ -69,7 +77,8 @@ asks whether the student will attend a midterm exam (колоквиум), other_
 - option: the value of the option to choose, or null if no option fits the rules or the form is other_form.
 - reason: one or two sentences: why this option, and why not the others (for example which classes they overlap).
 - message: one short English sentence for the student's phone saying what the form is for, at most 120 \
-characters, e.g. "Lab term survey for Operating Systems". Don't mention the option; that is added for you.
+characters, e.g. "Lab term survey for Operating Systems". Don't mention the option, the course code or the \
+sender; they are added for you.
 
 Rules for a lab exercise form:
 1. Leave out options marked [full or closed].
@@ -130,13 +139,16 @@ def form_schema(option_values: Iterable[str] = (), limits: bool = True) -> dict:
 
 
 def redact(text: str, private_words: Iterable[str]) -> str:
-    """Your name, address and index number -> [student]; every other email address -> [email]."""
+    """private_words (your name, ...) -> [student]. Whoever they belong to: email addresses -> [email],
+    IP addresses -> [ip], 6-digit numbers (index numbers) -> [index]."""
     text = unicodedata.normalize("NFC", text)
     words = sorted({unicodedata.normalize("NFC", w.strip()) for w in private_words if w.strip()}, key=len, reverse=True)
     for word in words:
         pattern = r"\s+".join(map(re.escape, word.split()))
         text = re.sub(rf"(?<!\w){pattern}(?!\w)", "[student]", text, flags=re.IGNORECASE)
-    return _EMAIL_RE.sub("[email]", text)
+    text = _EMAIL_RE.sub("[email]", text)
+    text = _IP_RE.sub("[ip]", text)
+    return _INDEX_RE.sub("[index]", text)
 
 
 def _safe(text: str, private_words: tuple[str, ...]) -> str:

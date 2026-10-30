@@ -75,6 +75,27 @@ def test_parse_schedule_reports_bad_line():
         parse_schedule("Понеделник 08:00-10:00 Веб\nПонеделник осум до десет")
 
 
+def test_parse_schedule_takes_any_time_of_day():
+    busy = parse_schedule("Понеделник 00:00-09:00 Спиење\nВторник 08:00-21:00 Зафатен\nСреда 22:00-24:00 Спиење")
+    assert [(s.weekday, s.start, s.end) for s in busy] == [
+        (MON, hm("00:00"), hm("09:00")),
+        (TUE, hm("08:00"), hm("21:00")),
+        (WED, hm("22:00"), hm("24:00")),
+    ]
+
+
+@pytest.mark.parametrize("line", ["Понеделник 23:00-07:00 Спиење", "Понеделник 10:00-10:00 Веб", "Понеделник 08:00-24:30 Веб"])
+def test_parse_schedule_rejects_ranges_outside_one_day(line):
+    with pytest.raises(ValueError, match="two lines"):
+        parse_schedule(line)
+
+
+def test_option_labels_keep_the_sanity_bounds():
+    # In a form option these are more likely a room or group number than a time.
+    assert parse_slot("Понеделник 00:00-09:00") is None
+    assert parse_slot("Вторник 08:00-21:00") is None
+
+
 def slot(weekday, start, end, day=None):
     return Slot(weekday, hm(start), hm(end), day)
 

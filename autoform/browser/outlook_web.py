@@ -26,11 +26,13 @@ SUBJECT = '[role="heading"][id$="_SUBJECT"][title]'
 # Only whether its title changes is used, so the language of the titles doesn't matter.
 TOGGLE = "button[title]"
 MARK_READ_WAIT_MS = 2000  # how long Outlook gets to mark an opened email as read
+CLICK_TIMEOUT_MS = 5000   # per try to open an email; a card covering the list is cleared between tries
+CLICK_TRIES = 3
 
 _READ_ITEMS_JS = """() => [...document.querySelectorAll('[role="listbox"] [role="option"][data-convid]')].map(o => ({
   convId: o.getAttribute('data-convid'),
   label: o.getAttribute('aria-label') || '',
-  titles: [...o.querySelectorAll('span[title]')].map(s => s.getAttribute('title')),
+  spans: [...o.querySelectorAll('span[title]')].map(s => [s.getAttribute('title') || '', s.innerText.trim()]),
 }))"""
 _BODY_LINKS_JS = """bodies => bodies.flatMap(b => [...b.querySelectorAll('a[href]')].map(a => [a.href, a.innerText.trim()]))"""
 
@@ -42,6 +44,9 @@ _TOGGLE_JS = """([convId, before, changed]) => {
 
 _DATE_RE = re.compile(r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)?", re.IGNORECASE)
 _ADDRESS_RE = re.compile(r"[^\s@<>]+@([^\s@<>]+\.[^\s@<>]+)")
+# Moodle sends as "Georgiev Pece (via COURSES)"; its own notices come from "Do not reply to this email".
+_VIA_RE = re.compile(r"\s*\((?:via|преку)\s[^()]*\)$", re.IGNORECASE)
+_NO_REPLY_RE = re.compile(r"no-?reply|do not reply|не одговар", re.IGNORECASE)
 
 
 class OutlookLoginNeeded(SetupError):
@@ -55,12 +60,19 @@ class ListedEmail:
     received: datetime | None
     tab: str | None = None  # "focused" / "other", or None without Focused Inbox
     sender: str = ""
+    sender_name: str = ""  # the name Outlook shows for sender, e.g. "Georgiev Pece (via COURSES)"
 
 
 def is_course_sender(address: str, domain_prefix: str) -> bool:
     """True for any address on a domain starting with domain_prefix ("x@courses.example.edu" for "courses.")."""
     m = _ADDRESS_RE.fullmatch(address.strip())
     return bool(m and domain_prefix and m.group(1).casefold().startswith(domain_prefix.casefold()))
+
+
+def person(sender_name: str) -> str:
+    """Who sent a Moodle email: "Georgiev Pece (via COURSES)" -> "Georgiev Pece". "" for Moodle's no-reply sender."""
+    name = _VIA_RE.sub("", " ".join(sender_name.split()))
+    return "" if _NO_REPLY_RE.search(name) else name
 
 
 def parse_list_date(text: str) -> datetime | None:
@@ -110,12 +122,11 @@ def list_course_emails(page: Page, domain_prefix: str, since: datetime | None = 
             seen.update(r["convId"] for r in rows)
             oldest = None
             for raw in new:
-                titles = [t or "" for t in raw["titles"]]
-                received = next((d for d in map(parse_list_date, titles) if d), None)
+                received = next((d for d in (parse_list_date(title) for title, _ in raw["spans"]) if d), None)
                 oldest = min(filter(None, (oldest, received)), default=None)
-                sender = next((t for t in titles if is_course_sender(t, domain_prefix)), None)
+                sender = next((span for span in raw["spans"] if is_course_sender(span[0], domain_prefix)), None)
                 if sender:
-                    found.setdefault(raw["convId"], ListedEmail(raw["convId"], raw["label"], received, tab, sender))
+                    found.setdefault(raw["convId"], ListedEmail(raw["convId"], raw["label"], received, tab, *sender))
             if scroll == max_scrolls or (since and oldest and oldest < since) or not _scroll(page):
                 break
     emails = [e for e in found.values() if not since or not e.received or e.received >= since]
@@ -182,7 +193,7 @@ def read_email(page: Page, item: ListedEmail, timeout_ms: int, keep_unread: bool
     row = _show_item(page, item)
     toggle = row.locator(TOGGLE).first
     before = toggle.get_attribute("title") if toggle.count() else None
-    row.click()
+    _click_row(page, row, item)
     page.wait_for_url(lambda url: item.conv_id in unquote(url), timeout=timeout_ms)
     page.wait_for_selector(BODY, timeout=timeout_ms)
     page.wait_for_timeout(500)  # the body is filled in a moment after it appears
@@ -193,7 +204,29 @@ def read_email(page: Page, item: ListedEmail, timeout_ms: int, keep_unread: bool
     log.debug("read email %r: %d link(s)", subject, len(links))
     if keep_unread and before is not None:
         _restore_unread(page, item, before)
-    return Email(message_id=item.conv_id, subject=subject, body=text, received=item.received, links=links)
+    return Email(message_id=item.conv_id, subject=subject, body=text, received=item.received, links=links,
+                 sender=person(item.sender_name))
+
+
+def _click_row(page: Page, row, item: ListedEmail) -> None:
+    """Click an email in the list.
+
+    After a click the mouse stays where it was, and if that spot is a name or an attachment,
+    Outlook opens a contact or attachment card there, which covers the list. Playwright doesn't
+    move the mouse while a click is blocked, so the card would never close: move it away first,
+    and press Escape for a card that stays open.
+    """
+    for attempt in range(CLICK_TRIES):
+        page.mouse.move(0, 0)
+        if attempt:
+            page.keyboard.press("Escape")
+        try:
+            row.click(timeout=CLICK_TIMEOUT_MS)
+            return
+        except PlaywrightTimeout:
+            if attempt == CLICK_TRIES - 1:
+                raise
+            log.info("something covered email %s in the list; trying again", item.conv_id)
 
 
 def _toggle_is(page: Page, item: ListedEmail, before: str, changed: bool, timeout_ms: int) -> bool:
@@ -211,8 +244,11 @@ def _restore_unread(page: Page, item: ListedEmail, before: str) -> None:
     toggle = _show_item(page, item).locator(TOGGLE).first
     toggle.dispatch_event("click")
     if not _toggle_is(page, item, before, changed=False, timeout_ms=3000):
-        _show_item(page, item).hover()  # the toggle may only react to a real click on the hovered row
-        toggle.click(force=True)
+        try:  # the toggle may only react to a real click on the hovered row
+            _show_item(page, item).hover(timeout=CLICK_TIMEOUT_MS)
+            toggle.click(force=True, timeout=CLICK_TIMEOUT_MS)
+        except PlaywrightTimeout:
+            pass
         if not _toggle_is(page, item, before, changed=False, timeout_ms=3000):
             log.warning("could not mark email %s unread again", item.conv_id)
             return

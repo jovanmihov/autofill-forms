@@ -31,9 +31,11 @@ py -3.13 -m venv .venv
 Copy `preferences.example\` to `preferences\` and fill in your own data (it is gitignored):
 
 - `preferences\profile.yaml`: your study program (`program_aliases`), the other programs, lab rules, and
-  `private_words` (your name in every spelling, your email address, your index number: removed before
-  anything goes to Gemini).
+  `private_words`: your name in every spelling (Cyrillic and Latin; Moodle writes "Hi Име Презиме,"), removed
+  before anything goes to Gemini.
 - `preferences\schedule.txt`: your weekly classes, one per line, e.g. `Понеделник 08:00-10:00 Веб програмирање`.
+  Any other time you're not free goes in the same way, at any hour and for any length
+  (`Понеделник 00:00-09:00 Спиење`, `Вторник 08:00-21:00 Зафатен`); a night goes on two lines.
 
 Then:
 
@@ -54,8 +56,8 @@ py main.py run --dry-run --headed --lookback-days 7   # everything except saving
    No billing account is needed; don't enable billing on the project if you want to be sure nothing is charged.
 2. `py main.py set-gemini-key` and paste it. The script checks the key right away.
 
-The models are in `config.yaml` (`gemini.models`): `gemini-3.8-flash`, then `gemini-3.5-flash-lite` if the first
-one is rate limited or fails. Without a saved key, the keyword classifier is used instead (see Safety).
+The models are in `config.yaml` (`gemini.models`): `gemini-3.5-flash-lite`, then `gemini-3.8-flash` if the first
+one is rate limited or fails. (Flash-Lite goes first because Flash often timed out or was overloaded.) Without a saved key, the keyword classifier is used instead (see Safety).
 
 ### Phone messages (Discord)
 
@@ -66,13 +68,15 @@ one is rate limited or fails. Without a saved key, the keyword classifier is use
    notifications while you're active in Discord on the PC (User Settings > Notifications > Push Notification
    Inactive Timeout).
 
-Each new course email gives one message, for example:
+Each new course email gives one message. Its title says what kind of email it is, the course (the short name
+Moodle puts at the start of the subject, e.g. `Аипс`) and who sent it, when the email has them:
 
 ```
-Lab: Lab term survey for Operating Systems. I chose Среда 12:00-14:00 for you.
-Event: Free AI workshop on Nov 18 at 17:00
-Schedule change: Web Programming lecture moved to Wed 17:00
-Needs you: Midterm survey for Databases: Gemini suggests 'Да', the checks say skip (for other program(s): КН)
+Lab · Аипс · Georgiev Pece: Lab term survey. I chose Среда 12:00-14:00 for you.
+Event · Krajchevska Evgenija: Free AI workshop on Nov 18 at 17:00
+Schedule change · Лаип · Georgiev Pece: Lecture moved to Wed 17:00
+Needs you · БП · Stojcheva Marija: Midterm survey: Gemini suggests 'Да', the checks say skip (for other program(s): КН)
+Course email: New login to your Moodle account
 ```
 
 ## Commands
@@ -142,9 +146,10 @@ mark emails read only "when the selection changes", an email can still end up re
 
 Each email is asked about once; a form that isn't open yet is asked about when it opens.
 
-Before sending, everything in `private_words` (your name, address, index number) becomes `[student]` and every
-email address becomes `[email]`. Other people's names in an email (teachers, classmates in a signature or a
-list) are still sent.
+Before sending, everything in `private_words` (your name) becomes `[student]`, and for anyone: email addresses
+become `[email]`, IP addresses `[ip]` and 6-digit numbers (index numbers, which are also Moodle usernames)
+`[index]`. Other people's names in an email (teachers, classmates in a signature, students named in a faculty
+notice) and phone numbers are still sent.
 
 On the free tier, Google may use what you send to improve its products, and human reviewers may read it
 (not linked to your account). This applies in North Macedonia; in the EEA, Switzerland and the UK it doesn't.

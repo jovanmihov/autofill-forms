@@ -12,6 +12,10 @@ from functools import lru_cache
 from .models import Analysis, Category, FormType, Option
 from .schedule import normalize, parse_slot
 
+# Moodle starts a course email's subject with the course's short name: "Аипс-2026/2027/Z-49_45136: ...".
+_COURSE_RE = re.compile(r"\s*([^\s:]{1,30}?)(?:-\d{2,4}/\d{2,4}[^\s:]*)?:\s+")
+_NOT_COURSES = ("re", "fw", "fwd", "aw", "tr")
+
 YES_WORDS = ("да", "yes", "da", "ќе присуствувам", "присуствувам")
 NO_WORDS = ("не", "no", "ne", "нема")
 
@@ -72,7 +76,18 @@ def keyword_analysis(subject: str, hints: frozenset[FormType], has_form: bool) -
         category = {FormType.LAB: Category.LAB_FORM, FormType.MIDTERM: Category.MIDTERM_FORM}.get(
             next(iter(hints)) if len(hints) == 1 else None, Category.OTHER_FORM
         )
-    return Analysis(category, " ".join(subject.split())[:200], source="keywords")
+    return Analysis(category, " ".join(without_course(subject).split())[:200], source="keywords")
+
+
+def course_code(subject: str) -> str:
+    """The course's short name from a Moodle subject, without the school year: "Аипс". "" if there is none."""
+    m = _COURSE_RE.match(subject)
+    return m.group(1) if m and m.group(1).casefold() not in _NOT_COURSES else ""
+
+
+def without_course(subject: str) -> str:
+    """The subject without the course's short name (that is shown on its own)."""
+    return _COURSE_RE.sub("", subject, count=1) if course_code(subject) else subject
 
 
 def options_shape(options: Iterable[Option]) -> FormType | None:
