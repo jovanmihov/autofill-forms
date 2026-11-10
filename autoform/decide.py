@@ -20,20 +20,25 @@ def _strip_faculty_name(text: str) -> str:
 
 def decide_midterm(options: Iterable[Option], context: str, profile: Profile) -> Decision:
     options = list(options)
+    programs = profile.program_aliases + profile.other_programs
+    per_program = any(mentions(o.label, programs) for o in options)
     labels = " \n".join(o.label for o in options)
-    text = _strip_faculty_name(f"{context}\n{labels}")
-    mine = find_phrases(text, profile.program_aliases)
-    others = find_phrases(text, profile.other_programs)
+    # Another program in an option ("I will take the exam (SEIS)") only says that option isn't mine,
+    # so whether the midterm is for other programs alone is read from the title, intro and email.
+    mine = find_phrases(_strip_faculty_name(f"{context}\n{labels}"), profile.program_aliases)
+    others = find_phrases(_strip_faculty_name(context), profile.other_programs)
     if others and not mine:
         return Decision(Action.SKIP, FormType.MIDTERM, reason=f"for other program(s): {', '.join(others)}")
 
     yes = [o for o in options if not o.disabled and is_yes(o.label)]
-    programs = profile.program_aliases + profile.other_programs
-    if any(mentions(o.label, programs) for o in options):
+    if per_program:
         # Options are per program: take the yes for mine, else a yes that names no program.
         picks = [o for o in yes if mentions(o.label, profile.program_aliases)]
         if not picks:
             picks = [o for o in yes if not mentions(o.label, programs)]
+        if not picks and yes:
+            named = find_phrases(" \n".join(o.label for o in yes), profile.other_programs)
+            return Decision(Action.SKIP, FormType.MIDTERM, reason=f"for other program(s): {', '.join(named)}")
     else:
         picks = yes
 

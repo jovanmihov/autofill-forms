@@ -50,8 +50,12 @@ _OPTION_BOUNDS = (6 * 60, 23 * 60, 6 * 60)
 _SCHEDULE_BOUNDS = (0, 24 * 60, 24 * 60)
 
 
+_APOSTROPHES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "`": "'"})
+
+
 def normalize(text: str) -> str:
-    return unicodedata.normalize("NFC", text).casefold()
+    """For matching: NFC, case-folded, and "I’ll" written like "I'll"."""
+    return unicodedata.normalize("NFC", text).casefold().translate(_APOSTROPHES)
 
 
 def fmt_time(minutes: int) -> str:

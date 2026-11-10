@@ -79,6 +79,24 @@ Needs you · БП · Stojcheva Marija: Midterm survey: Gemini suggests 'Да', t
 Course email: New login to your Moodle account
 ```
 
+## Run it
+
+```
+py main.py watch
+```
+
+This keeps checking for new course emails every 30 seconds and really saves form answers, until you press Ctrl+C.
+Add `--dry-run` to save nothing and send no messages, or `--headed` to see the browser window.
+
+If Outlook logged you out, close `watch` and run:
+
+```
+py main.py browse
+```
+
+Log in, wait for the Inbox, close the window, then run `py main.py watch` again. The two can't run at the same
+time, because they share one browser profile.
+
 ## Commands
 
 | Command | What it does |

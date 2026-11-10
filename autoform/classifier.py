@@ -16,8 +16,38 @@ from .schedule import normalize, parse_slot
 _COURSE_RE = re.compile(r"\s*([^\s:]{1,30}?)(?:-\d{2,4}/\d{2,4}[^\s:]*)?:\s+")
 _NOT_COURSES = ("re", "fw", "fwd", "aw", "tr")
 
-YES_WORDS = ("да", "yes", "da", "ќе присуствувам", "присуствувам")
-NO_WORDS = ("не", "no", "ne", "нема")
+# What a midterm option saying "I'll be there" can look like. Whole words, so "полагам" also covers
+# "Ќе полагам (мк)", "Ке го полагам" and "Сакам да полагам". An option with any NO_WORDS is never a yes:
+# "Не полагам", "Нема да присуствувам", "I won't take the exam".
+YES_WORDS = (
+    # Macedonian
+    "да",
+    "полагам",                                   # ќе полагам, ќе го полагам колоквиумот
+    "присуствувам", "присутен", "присутна",      # ќе присуствувам
+    "пристапувам", "пристапам",                  # ќе пристапам на колоквиумот
+    "излегувам", "излезам",                      # ќе излезам на колоквиум
+    "учествувам",                                # ќе учествувам
+    "доаѓам", "дојдам",                          # ќе дојдам
+    "пријавувам",                                # се пријавувам
+    "заинтересиран", "заинтересирана",           # заинтересиран сум за полагање
+    # Macedonian in Latin letters
+    "da", "polagam", "prisustvuvam", "prisuten", "prisutna", "pristapuvam", "pristapam",
+    "izleguvam", "izlezam", "uchestvuvam", "ucestvuvam", "doagjam", "doagam", "dojdam",
+    "prijavuvam", "zainteresiran", "zainteresirana",
+    # English
+    "yes",
+    "will take", "i'll take", "want to take", "take the exam", "take the midterm", "taking",
+    "will sit", "i'll sit", "sit the exam",
+    "attend", "attending",                       # I will attend
+    "participate", "participating",
+    "will come", "i'll come", "coming", "will be there", "i'll be there",
+    "present", "interested", "count me in", "sign me up",
+)
+NO_WORDS = (
+    "не", "нема", "откажувам", "одјавувам",
+    "ne", "nema", "otkazuvam", "odjavuvam",
+    "no", "not", "won't", "don't", "can't", "cannot",
+)
 
 
 def _phrase_pattern(phrase: str, prefix: bool) -> str:

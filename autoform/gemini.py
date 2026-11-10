@@ -91,8 +91,9 @@ date and time when every option has a date. If no option is left, option is null
 Rules for a midterm form:
 1. The student's study program: {mine}. The faculty's other study programs: {others}.
 2. If the midterm (in the form or the email) is only for other study programs, option is null.
-3. Otherwise choose the option saying the student will attend (e.g. "Да", "Ќе присуствувам"). If the \
-options are per study program, choose the "yes" for the student's program.
+3. Otherwise choose the option saying the student will attend (e.g. "Да", "Ќе присуствувам", "Ќе полагам"). \
+If the options are per study program, choose the "yes" for the student's program, or else the "yes" that \
+names no study program.
 
 The student's schedule (times when the student has classes):
 {schedule}"""

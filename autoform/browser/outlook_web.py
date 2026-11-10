@@ -26,8 +26,13 @@ SUBJECT = '[role="heading"][id$="_SUBJECT"][title]'
 # Only whether its title changes is used, so the language of the titles doesn't matter.
 TOGGLE = "button[title]"
 MARK_READ_WAIT_MS = 2000  # how long Outlook gets to mark an opened email as read
-CLICK_TIMEOUT_MS = 5000   # per try to open an email; a card covering the list is cleared between tries
+CLICK_TIMEOUT_MS = 5000   # per try to open an email; between tries a covering card is cleared and the row found again
 CLICK_TRIES = 3
+TAB_REDRAW_MS = 10_000    # how long the list gets to show a tab's emails after the tab is clicked
+
+_ROW_IDS_JS = """() => [...document.querySelectorAll('[role="listbox"] [role="option"][data-convid]')]
+  .map(o => o.getAttribute('data-convid')).join(' ')"""
+_ROWS_CHANGED_JS = f"""before => ({_ROW_IDS_JS})() !== before"""
 
 _READ_ITEMS_JS = """() => [...document.querySelectorAll('[role="listbox"] [role="option"][data-convid]')].map(o => ({
   convId: o.getAttribute('data-convid'),
@@ -134,10 +139,22 @@ def list_course_emails(page: Page, domain_prefix: str, since: datetime | None = 
 
 
 def _select_tab(page: Page, tab: str | None) -> None:
-    if tab and page.locator(f'{TAB.format(tab)}[aria-selected="true"]').count() == 0:
-        page.locator(TAB.format(tab)).click()
-        page.wait_for_selector(f'{TAB.format(tab)}[aria-selected="true"]')
-        page.wait_for_timeout(1500)  # the list redraws after the switch
+    """Switch to the Focused or Other tab and wait until the list shows that tab's emails.
+
+    Outlook marks the tab selected at once but redraws the list later. Until then the list still
+    shows the other tab's emails, which would be taken for this tab's (and vanish when clicked).
+    """
+    selected = f'{TAB.format(tab)}[aria-selected="true"]'
+    if not tab or page.locator(selected).count():
+        return
+    before = page.evaluate(_ROW_IDS_JS)
+    page.locator(TAB.format(tab)).click()
+    page.wait_for_selector(selected)
+    try:
+        page.wait_for_function(_ROWS_CHANGED_JS, arg=before, timeout=TAB_REDRAW_MS)
+    except PlaywrightTimeout:
+        log.debug("the list shows the same emails after switching to the %s tab", tab)
+    page.wait_for_timeout(1000)  # the rest of the rows are drawn a moment later
 
 
 # Scroll the message list's scroll container. "down" moves 3/4 of a screen, so no row is
@@ -170,17 +187,25 @@ def _scroll_to_top(page: Page) -> None:
 
 
 def _show_item(page: Page, item: ListedEmail, max_scrolls: int = 40):
-    """The row for item, scrolling to it if Outlook has stopped drawing it."""
-    _select_tab(page, item.tab)
+    """The row for item, scrolling to it if Outlook has stopped drawing it.
+
+    It is looked for in the tab it was listed under first, then in the other tab, in case
+    Outlook has moved it there since.
+    """
+    tabs = [item.tab]
+    if item.tab:
+        tabs += [t for t in ("focused", "other") if t != item.tab and page.locator(TAB.format(t)).count()]
     row = page.locator(f'{ITEM}[data-convid="{item.conv_id}"]').first
-    if row.count():
-        return row
-    _scroll_to_top(page)
-    for _ in range(max_scrolls):
+    for tab in tabs:
+        _select_tab(page, tab)
         if row.count():
             return row
-        if not _scroll(page):
-            break
+        _scroll_to_top(page)
+        for _ in range(max_scrolls):
+            if row.count():
+                return row
+            if not _scroll(page):
+                break
     raise LookupError(f"email {item.conv_id} is no longer in the Inbox list")
 
 
@@ -215,18 +240,22 @@ def _click_row(page: Page, row, item: ListedEmail) -> None:
     Outlook opens a contact or attachment card there, which covers the list. Playwright doesn't
     move the mouse while a click is blocked, so the card would never close: move it away first,
     and press Escape for a card that stays open.
+
+    The row can also be gone by the time it is clicked (Outlook redrew the list or moved the
+    email to the other tab), so it is looked for again before each new try.
     """
     for attempt in range(CLICK_TRIES):
         page.mouse.move(0, 0)
         if attempt:
             page.keyboard.press("Escape")
+            row = _show_item(page, item)
         try:
             row.click(timeout=CLICK_TIMEOUT_MS)
             return
         except PlaywrightTimeout:
             if attempt == CLICK_TRIES - 1:
                 raise
-            log.info("something covered email %s in the list; trying again", item.conv_id)
+            log.info("could not click email %s in the list (covered, or no longer there); trying again", item.conv_id)
 
 
 def _toggle_is(page: Page, item: ListedEmail, before: str, changed: bool, timeout_ms: int) -> bool:

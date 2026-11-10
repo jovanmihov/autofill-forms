@@ -54,6 +54,32 @@ def test_midterm_per_program_options_without_mine_is_skipped():
     assert d.action is Action.SKIP
 
 
+AIPS_POLL = ("Ќе полагам (мк)", "I will take the exam (SEIS)", "Нема да полагам/I won't take the exam")
+AIPS_CONTEXT = "Анкета за прв колоквиум/Survey for the first midterm exam\nСите студенти што сакаат да го полагаат"
+
+
+def test_midterm_language_options_pick_the_one_naming_no_other_program():
+    profile = Profile(program_aliases=("КН",), other_programs=("СИИС", "SEIS", "ПИТ"))
+    d = decide_midterm(opts(*AIPS_POLL), AIPS_CONTEXT, profile)
+    assert d.action is Action.SUBMIT
+    assert d.option.label == "Ќе полагам (мк)"
+
+
+def test_midterm_option_for_another_program_does_not_skip_the_form():
+    profile = Profile(program_aliases=("КН",), other_programs=("SEIS",))
+    d = decide_form(frozenset({FormType.MIDTERM}), page(*AIPS_POLL), AIPS_CONTEXT, profile, [])
+    assert (d.action, d.option.label) == (Action.SUBMIT, "Ќе полагам (мк)")
+    # With Gemini: its pick of the (мк) option passes the same checks.
+    d = check_suggestion(gemini("midterm_form", "0"), page(*AIPS_POLL), AIPS_CONTEXT, profile, [])
+    assert (d.action, d.option.label) == (Action.SUBMIT, "Ќе полагам (мк)")
+
+
+def test_midterm_only_for_other_program_by_email_is_still_skipped():
+    profile = Profile(program_aliases=("КН",), other_programs=("SEIS",))
+    d = decide_midterm(opts(*AIPS_POLL), "Колоквиум само за SEIS", profile)
+    assert d.action is Action.SKIP
+
+
 def test_midterm_several_yes_needs_user():
     d = decide_midterm(opts("Да, во 10 часот", "Да, во 12 часот", "Не"), "", PROFILE)
     assert d.action is Action.NEEDS_USER

@@ -39,7 +39,40 @@ def test_email_hints(text, expected):
         ("Да", True),
         ("Yes", True),
         ("Ќе присуствувам", True),
+        ("Ќе полагам (мк)", True),
+        ("I will take the exam (SEIS)", True),
+        ("Нема да полагам/I won't take the exam", False),
+        ("I will not take the exam", False),
+        ("I won’t attend", False),
         ("Не", False),
+        # Other ways to say yes
+        ("Ке го полагам колоквиумот", True),
+        ("Сакам да полагам", True),
+        ("Ќе пристапам на колоквиумот", True),
+        ("Ќе излезам на колоквиум", True),
+        ("Ќе учествувам", True),
+        ("Ќе дојдам", True),
+        ("Се пријавувам", True),
+        ("Присутен/Присутна", True),
+        ("Заинтересиран сум", True),
+        ("Ke polagam", True),
+        ("Kje prisustvuvam", True),
+        ("I’ll take the midterm", True),
+        ("I want to take the exam", True),
+        ("I will attend", True),
+        ("I'll be there", True),
+        ("Attending (EN)", True),
+        ("Count me in", True),
+        # ... and no
+        ("Не полагам", False),
+        ("Нема да присуствувам", False),
+        ("Не сум заинтересиран", False),
+        ("Ја откажувам пријавата", False),
+        ("Ne polagam", False),
+        ("I don't want to take the exam", False),
+        ("I can't attend", False),
+        ("Not attending", False),
+        ("No, I won’t be there", False),
         ("Не, нема да присуствувам", False),
         ("Не ќе присуствувам", False),
         ("Дали", False),
@@ -58,6 +91,9 @@ def test_options_shape():
     assert options_shape(opts("Понеделник 08:00-10:00 Лаб 215", "Среда 10-12 Лаб 215")) is FormType.LAB
     assert options_shape(opts("Пон 08-10", "Сре 10-12", "Не можам во ниеден термин")) is FormType.LAB
     assert options_shape(opts("Да, ќе присуствувам", "Не")) is FormType.MIDTERM
+    # Аипс 2026/27, first midterm: no Да/Не at all.
+    poll = opts("Ќе полагам (мк)", "I will take the exam (SEIS)", "Нема да полагам/I won't take the exam")
+    assert options_shape(poll) is FormType.MIDTERM
     assert options_shape(opts("СИИС", "ПИТ")) is None
     assert options_shape([]) is None
 

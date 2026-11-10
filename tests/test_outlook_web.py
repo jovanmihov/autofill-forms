@@ -60,10 +60,10 @@ def test_person(shown, expected):
 BASE = "https://outlook.example.test"
 
 
-def row(conv_id, sender, unread, subject="Предмет", name="Sender"):
+def row(conv_id, sender, unread, subject="Предмет", name="Sender", tab=""):
     toggle = "Mark as read" if unread else "Mark as unread"
     return (
-        f'<div role="option" data-convid="{conv_id}" aria-label="{subject}" '
+        f'<div role="option" data-convid="{conv_id}" data-tab="{tab}" aria-label="{subject}" '
         'style="position:relative;display:block;padding:20px 20px 20px 60px;width:600px">'
         f'<button title="{toggle}" style="position:absolute;left:4px;top:4px;width:8px;height:8px"></button>'
         f'<span title="{sender}">{name}</span> <span title="{subject}">{subject}</span>'
@@ -88,11 +88,33 @@ document.querySelectorAll('[role=option]').forEach(row => {
     setTimeout(() => { toggle.title = 'Mark as unread'; }, 200);
   });
 });
+// Focused / Other: a clicked tab is marked selected at once; the list shows its emails window.redrawMs later.
+const list = document.querySelector('[role=listbox]');
+const allRows = [...list.children];
+window.redrawMs = 0;
+const draw = () => {
+  const tab = document.querySelector('[role=tab][aria-selected=true]');
+  if (tab) list.replaceChildren(...allRows.filter(row => row.dataset.tab === tab.value));
+};
+document.querySelectorAll('[role=tab]').forEach(tab => tab.addEventListener('click', () => {
+  document.querySelectorAll('[role=tab]').forEach(t => t.setAttribute('aria-selected', String(t === tab)));
+  setTimeout(draw, window.redrawMs);
+}));
+window.moveToOtherTab = id => {
+  const row = allRows.find(row => row.dataset.convid === id);
+  row.dataset.tab = row.dataset.tab === 'focused' ? 'other' : 'focused';
+  draw();
+};
+draw();
 </script>"""
 
+TABS = ('<button role="tab" value="focused" aria-selected="true">Focused</button>'
+        '<button role="tab" value="other" aria-selected="false">Other</button>')
 
-def outlook_page(*rows):
-    return f'<html><body><div role="listbox">{"".join(rows)}</div><div id="pane"></div>{OUTLOOK_JS}</body></html>'
+
+def outlook_page(*rows, tabs=False):
+    return (f'<html><body>{TABS if tabs else ""}<div role="listbox">{"".join(rows)}</div>'
+            f'<div id="pane"></div>{OUTLOOK_JS}</body></html>')
 
 
 @pytest.fixture(scope="module")
@@ -110,9 +132,9 @@ def browser():
 def outlook(browser):
     page = browser.new_page()
 
-    def serve(*rows):
+    def serve(*rows, tabs=False):
         page.route(f"{BASE}/**", lambda route: route.fulfill(
-            status=200, content_type="text/html; charset=utf-8", body=outlook_page(*rows)))
+            status=200, content_type="text/html; charset=utf-8", body=outlook_page(*rows, tabs=tabs)))
         page.goto(f"{BASE}/mail/")
         return page
 
@@ -192,3 +214,41 @@ def test_a_card_over_the_list_doesnt_block_the_next_email(outlook, monkeypatch, 
     read_email(page, second, 5000)
     assert page.url.endswith("/mail/inbox/id/b")
     assert page.locator("#card").count() == 0
+
+
+# --- Focused / Other tabs ------------------------------------------------------
+
+COURSES = "noreply@courses.example.edu"
+
+
+def test_a_slow_tab_switch_doesnt_mix_up_the_tabs(outlook):
+    """The list still shows Focused's emails for a while after Other is clicked."""
+    page = outlook(row("a", COURSES, False, tab="focused"), row("b", COURSES, False, tab="other"), tabs=True)
+    page.evaluate("window.redrawMs = 1800")
+    found = list_course_emails(page, "courses.")
+    assert sorted((e.conv_id, e.tab) for e in found) == [("a", "focused"), ("b", "other")]
+    other = next(e for e in found if e.conv_id == "b")
+    read_email(page, other, 5000)
+    assert page.url.endswith("/mail/inbox/id/b")
+
+
+def test_an_email_that_moves_to_the_other_tab_just_before_the_click_is_opened(outlook, monkeypatch):
+    """The row was found, then Outlook moved the email to Other: the click waited for a row that was gone."""
+    monkeypatch.setattr(outlook_web, "CLICK_TIMEOUT_MS", 500)
+    page = outlook(row("a", COURSES, False, tab="focused"), tabs=True)
+    [item] = list_course_emails(page, "courses.")
+    assert item.tab == "focused"
+    # read_email moves the mouse to the corner just before it clicks the row
+    page.evaluate("""() => document.addEventListener('mousemove', e => {
+      if (e.clientX < 5 && e.clientY < 5 && !window.moved) window.moved = window.moveToOtherTab('a') || true;
+    })""")
+    read_email(page, item, 5000)
+    assert page.url.endswith("/mail/inbox/id/a")
+
+
+def test_an_email_listed_under_the_wrong_tab_is_found_in_the_other(outlook):
+    page = outlook(row("a", COURSES, False, tab="focused"), tabs=True)
+    [item] = list_course_emails(page, "courses.")
+    page.evaluate("window.moveToOtherTab('a')")
+    read_email(page, item, 5000)
+    assert page.url.endswith("/mail/inbox/id/a")
